@@ -81,20 +81,7 @@ class LSM6DS3_Accel(Sensor):
     event.type = 1  # SENSOR_TYPE_ACCELEROMETER
     event.source = self.source
     a = event.init('acceleration')
-    # 传感器水平放置（Z轴垂直朝上）映射到 openpilot 设备坐标系
-    # locationd.py L109: meas = [-v[2], -v[1], -v[0]]
-    # pose_kf.py: gravity=[0,0,-9.81], 静止时期望 meas[2]=-9.81 → 需要 -v[0]=-9.81 → v[0]=+9.81
-    #
-    # 实测传感器物理方向（标定确认）:
-    #   sensor_X+ = 左方向, sensor_Y+ = 后方, sensor_Z+ = 上
-    # openpilot 设备坐标系期望:
-    #   meas[0](前进)=前方+, meas[1](右)=右方+, meas[2](上)=上+ (重力=-9.81)
-    #
-    # 推导:
-    #   v[0]=+z  → meas[2]=-v[0]=-z ≈ -9.81 ✓
-    #   v[1]=+x  → meas[1]=-v[1]=-x_raw; sensor_X+=左 → 左倾时x_raw>0 → meas[1]<0 ✓ (重力向左)
-    #   v[2]=+y  → meas[0]=-v[2]=-y_raw; 上坡时前方抬起→y_raw>0 → meas[0]<0 ✓ (重力向后=上坡)
-    a.v = [z, x, y]
+    a.v = [z, y, -x]
     a.status = 1
     return event
 

@@ -63,10 +63,7 @@ class LSM6DS3_Gyro(Sensor):
     y = self.parse_16bit(b[2], b[3])
     z = self.parse_16bit(b[4], b[5])
     scale = (8.75 / 1000.0) * (math.pi / 180.0)
-    # 传感器水平放置，与加速度计保持相同的坐标映射: [z, x, y]
-    # 实测: sensor_X+=左, sensor_Y+=后, sensor_Z+=上
-    # locationd: meas = [-v[2], -v[1], -v[0]] → meas=[-y, -x, -z]
-    xyz = [z * scale, x * scale, y * scale]
+    xyz = [z * scale, y * scale, -x * scale]
 
     event = log.SensorEventData.new_message()
     event.timestamp = ts
