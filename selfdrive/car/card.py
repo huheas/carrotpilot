@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import math
 import os
 import time
 import threading
@@ -18,6 +19,7 @@ from opendbc.car.fw_versions import ObdCallback
 from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from opendbc.safety import ALTERNATIVE_EXPERIENCE
+from openpilot.common.conversions import Conversions as CV
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseCarrot
 from openpilot.selfdrive.car.car_specific import MockCarState
@@ -217,7 +219,11 @@ class Car:
       v_cruise_cluster_kph = self.v_cruise_helper.v_cruise_cluster_kph
     CS.logCarrot = self.v_cruise_helper.log
     CS.vCruise = float(v_cruise_kph)
-    CS.vCruiseCluster = float(v_cruise_cluster_kph)
+    # 始终使用原车ACC巡航速度，避免HUD显示不一致
+    # 原代码: CS.vCruiseCluster = float(v_cruise_cluster_kph)
+    # 新代码: 直接使用CS.cruiseState.speed (真正的原车ACC速度)
+    cruise_speed_kph = CS.cruiseState.speed * CV.MS_TO_KPH if CS.cruiseState.speed > 0 else 0
+    CS.vCruiseCluster = float(cruise_speed_kph)
     CS.softHoldActive = self.v_cruise_helper._soft_hold_active
     CS.activateCruise = self.v_cruise_helper._activate_cruise
     CS.latEnabled = self.v_cruise_helper._lat_enabled
@@ -231,7 +237,7 @@ class Car:
     """carState and carParams publish loop"""
 
     # carParams - logged every 50 seconds (> 1 per segment)
-    if self.sm.frame % int(50. / DT_CTRL) == 0:
+    if self.sm.frame % int(50.0 / DT_CTRL) == 0:
       cp_send = messaging.new_message('carParams')
       cp_send.valid = True
       cp_send.carParams = self.CP
@@ -248,7 +254,7 @@ class Car:
     cs_send.valid = CS.canValid
     cs_send.carState = CS
     cs_send.carState.canErrorCounter = self.can_rcv_cum_timeout_counter
-    cs_send.carState.cumLagMs = -self.rk.remaining * 1000.
+    cs_send.carState.cumLagMs = -self.rk.remaining * 1000.0
     self.pm.send('carState', cs_send)
 
     if RD is not None:
@@ -267,6 +273,11 @@ class Car:
       # signal pandad to switch to car safety mode
       self.params.put_bool_nonblocking("ControlsReady", True)
 
+    # BYD ACC enhance: compute acceleration for button mode
+    is_byd = self.CP.brand.lower() == "byd" if hasattr(self.CP, 'brand') else False
+    if is_byd and not CC.longActive and CS.cruiseState.enabled:
+      self._update_acc_enhance(CS, CC)
+
     if self.sm.all_alive(['carControl']):
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
@@ -275,13 +286,106 @@ class Car:
 
       self.CC_prev = CC
 
+  def _update_acc_enhance(self, CS: car.CarState, CC: car.CarControl):
+    cfg = {
+      'lead_dist_critical': 30,
+      'lead_dist_caution': 20,
+      'traffic_light_distance': 50,
+      'brake_accel_min': -1.0,
+      'decel_k_base': 0.05,
+      'decel_k_sqrt': 0.08,
+      'decel_k_quad': 0.001,
+    }
+
+    driver_overriding = CS.gasPressed or CS.brakePressed
+
+    if self.sm.alive['radarState']:
+      lead = self.sm['radarState'].leadOne
+      if lead.status:
+        if lead.dRel < cfg['lead_dist_critical']:
+          self.CI.CS.acc_enhance_request = False
+          self.CI.CS.acc_enhance_accel = 0.0
+          return
+        if lead.dRel < cfg['lead_dist_caution'] and lead.vRel < -2.0:
+          self.CI.CS.acc_enhance_request = False
+          self.CI.CS.acc_enhance_accel = 0.0
+          return
+
+    if not self.sm.alive['carrotMan'] and not driver_overriding:
+      self.CI.CS.acc_enhance_request = False
+      self.CI.CS.acc_enhance_accel = 0.0
+      return
+
+    carrot = self.sm['carrotMan']
+    v_ego_kph = CS.vEgo * 3.6
+
+    need_brake = False
+    accel = 0.0
+    in_speed_limit_scene = False
+    target_speed = 0.0
+
+    if carrot.trafficState == 1:
+      if self.sm.alive['radarState']:
+        lead = self.sm['radarState'].leadOne
+        if not (lead.status and lead.dRel < cfg['traffic_light_distance']):
+          need_brake = True
+          accel = -0.5
+
+    if not need_brake:
+      vturn_raw = carrot.vTurnSpeed
+      vturn = abs(vturn_raw)
+      if vturn > 0 and vturn < 200:
+        target_speed = vturn
+        if v_ego_kph > vturn:
+          speed_diff = v_ego_kph - vturn
+          accel = -(cfg['decel_k_base'] * speed_diff + cfg['decel_k_sqrt'] * math.sqrt(speed_diff) + cfg['decel_k_quad'] * speed_diff * speed_diff)
+          accel = max(cfg['brake_accel_min'], accel)
+          need_brake = True
+        else:
+          in_speed_limit_scene = True
+
+    if not need_brake:
+      if 0 < carrot.desiredSpeed < 200:
+        target_speed = max(target_speed, carrot.desiredSpeed)
+        if v_ego_kph > carrot.desiredSpeed:
+          speed_diff = v_ego_kph - carrot.desiredSpeed
+          accel = -(cfg['decel_k_base'] * speed_diff + cfg['decel_k_sqrt'] * math.sqrt(speed_diff) + cfg['decel_k_quad'] * speed_diff * speed_diff)
+          accel = max(cfg['brake_accel_min'], accel)
+          need_brake = True
+        else:
+          in_speed_limit_scene = True
+
+    if not need_brake:
+      if self.sm.alive['radarState']:
+        lead = self.sm['radarState'].leadOne
+        if lead.status and lead.dRel < 20 and lead.vRel < 0:
+          accel = max(cfg['brake_accel_min'], lead.vRel * 0.5)
+          need_brake = True
+          target_speed = max(target_speed, v_ego_kph)
+
+    if need_brake:
+      self.CI.CS.acc_enhance_request = True
+      self.CI.CS.acc_enhance_accel = 0.0 if driver_overriding else accel
+    elif self.CI.CS.acc_enhance_request:
+      if driver_overriding:
+        self.CI.CS.acc_enhance_request = True
+        self.CI.CS.acc_enhance_accel = 0.0
+      elif in_speed_limit_scene and target_speed > 0 and v_ego_kph >= target_speed:
+        self.CI.CS.acc_enhance_request = True
+        self.CI.CS.acc_enhance_accel = 0.0
+      else:
+        self.CI.CS.acc_enhance_request = False
+        self.CI.CS.acc_enhance_accel = 0.0
+    else:
+      self.CI.CS.acc_enhance_request = False
+      self.CI.CS.acc_enhance_accel = 0.0
+
   def step(self):
     CS, RD = self.state_update()
 
     self.state_publish(CS, RD)
 
-    initialized = (not any(e.name == EventName.selfdriveInitializing for e in self.sm['onroadEvents']) and
-                   self.sm.seen['onroadEvents'])
+    initialized = not any(e.name == EventName.selfdriveInitializing for e in self.sm['onroadEvents']) and self.sm.seen['onroadEvents']
     if not self.CP.passive and initialized:
       self.controls_update(CS, self.sm['carControl'])
 

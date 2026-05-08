@@ -65,7 +65,7 @@ AddOption('--mutation',
 AddOption('--minimal',
           action='store_false',
           dest='extras',
-          default=os.path.exists(File('#.lfsconfig').abspath), # minimal by default on release branch (where there's no LFS)
+          default=True, # 默认启用extras，不再依赖.lfsconfig文件
           help='the minimum build to run openpilot. no tests, tools, etc.')
 
 ## Architecture name breakdown (arch)
@@ -341,9 +341,13 @@ SConscript(['opendbc_repo/SConscript'], exports={'env': env_swaglog})
 
 SConscript(['cereal/SConscript'])
 
-Import('socketmaster', 'msgq')
+Import('socketmaster', 'msgq', 'visionipc')
 messaging = [socketmaster, msgq, 'capnp', 'kj',]
-Export('messaging')
+Export('messaging', 'visionipc')
+
+# gpucommon for camerad - GPU common libs (empty on non-TICI platforms)
+gpucommon = []
+Export('gpucommon')
 
 
 # Build other submodules
@@ -364,7 +368,8 @@ if arch != "Darwin":
     'system/sensord_wt/SConscript',
   ])
 
-if arch == "larch64":
+# Build camerad on all non-Darwin platforms (larch64 for TICI, x86_64 for PC testing)
+if arch != "Darwin":
   SConscript(['system/camerad/SConscript'])
 
 # Build openpilot

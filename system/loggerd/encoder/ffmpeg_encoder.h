@@ -9,6 +9,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/hwcontext.h>
 }
 
 #include "system/loggerd/encoder/encoder.h"
@@ -26,6 +27,7 @@ private:
   int segment_num = -1;
   int counter = 0;
   bool is_open = false;
+  bool software_encoding_mode = false;
 
   AVCodecContext *codec_ctx;
   AVFrame *frame = NULL;

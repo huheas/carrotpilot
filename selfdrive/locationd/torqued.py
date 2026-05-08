@@ -11,7 +11,6 @@ from openpilot.common.realtime import config_realtime_process, DT_MDL
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.locationd.helpers import PointBuckets, ParameterEstimator, PoseCalibrator, Pose
-from opendbc.car.byd.tuning import Tuning
 
 HISTORY = 5  # secs
 POINTS_PER_BUCKET = 1500

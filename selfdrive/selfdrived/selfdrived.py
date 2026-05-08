@@ -201,7 +201,16 @@ class SelfdriveD:
           self.events.add(EventName.pcmEnable)
 
       # Disable on rising edge of accelerator or brake. Also disable on brake when speed > 0
-      if (CS.gasPressed and not self.CS_prev.gasPressed and self.disengage_on_accelerator) or \
+      # For cars where user may press gas temporarily (e.g. to accelerate past a car),
+      # check if we should disengage based on whether the car's cruise system would disengage
+      gas_pressed_event = True
+      
+      # If the car's cruise state is still enabled, this indicates the car allows temporary gas press
+      # Don't immediately disengage in this case to match original cruise behavior
+      if CS.cruiseState.enabled and self.enabled:
+        gas_pressed_event = False
+      
+      if (CS.gasPressed and not self.CS_prev.gasPressed and self.disengage_on_accelerator and gas_pressed_event) or \
         (CS.brakePressed and (not self.CS_prev.brakePressed or not CS.standstill)) or \
         (CS.regenBraking and (not self.CS_prev.regenBraking or not CS.standstill)):
         self.events.add(EventName.pedalPressed)

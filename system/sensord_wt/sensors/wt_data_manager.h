@@ -4,6 +4,8 @@
 #include <mutex>
 #include <memory>
 #include <cstdint>
+#include <atomic>
+#include <thread>
 
 class WTDataManager {
 private:
@@ -12,19 +14,23 @@ private:
 
   std::string device_path;
   int serial_fd;
-  mutable std::mutex data_mutex;  // 添加 mutable
-  uint64_t last_update_time;
-  bool data_valid;
+  std::mutex data_mutex;  // 保护缓存数据
+  std::atomic<uint64_t> last_update_time;
+  std::atomic<bool> data_valid;
+  std::atomic<bool> reader_running;
+  std::thread reader_thread;
 
   WTDataManager(const std::string& device, int baud);
+  void reader_loop();
 
 public:
   static WTDataManager* getInstance(const std::string& device, int baud);
-  static WTDataManager* getInstance();  // 无参数版本
+  static WTDataManager* getInstance();
 
-  bool updateData();
-  bool isDataValid();  // 移除 const
-  uint64_t getLastUpdateTime();  // 移除 const
+  /** 获取最新缓存数据，不阻塞。返回 false 表示从未收到过数据 */
+  bool getLatestData() const;
+  bool isDataValid() const;
+  uint64_t getLastUpdateTime() const;
 
   ~WTDataManager();
 

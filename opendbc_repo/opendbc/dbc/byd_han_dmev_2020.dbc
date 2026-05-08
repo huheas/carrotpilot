@@ -191,6 +191,20 @@ BO_ 834 PEDAL: 8 XXX
  SG_ PowerMode : 28|2@1+ (1,0) [0|1] "" XXX
  SG_ CheckSum : 56|8@1+ (1,0) [0|255] "" XXX
 
+BO_ 843 MPC_0x34B: 8 ADS
+ SG_ Left_Lane_Line_Y_Distance_Real : 8|8@1+ (0.055,-6.85) [-15.0|5.0] "m" XXX
+ SG_ Right_Lane_Line_Y_Distance_Real : 32|8@1+ (0.054,-5.38) [-5.0|15.0] "m" XXX
+ SG_ Left_Lane_Line_Type_S : 0|2@1+ (1,0) [0|3] ""  XXX
+ SG_ Right_Lane_Line_Type_S : 2|2@1+ (1,0) [0|3] ""  XXX
+ SG_ Lane_Line_Curvature_S : 28|12@1+ (1.5E-005,-0.03071) [-0.030705|0.030705] "1/m" XXX
+ SG_ AliveCounter_34B_S : 52|4@1+ (1,0) [0|15] "" XXX
+ SG_ CheckSum_34B_S : 56|8@1+ (1,0) [0|255] "" XXX
+
+CM_ SG_ 843 Left_Lane_Line_Y_Distance_Real "Corrected definition based on real driving data analysis: Byte 1 maps to left lane line Y distance with high correlation to modelV2 data (-0.841 correlation, 0.097m RMSE)";
+CM_ SG_ 843 Right_Lane_Line_Y_Distance_Real "Corrected definition based on real driving data analysis: Byte 4 maps to right lane line Y distance with high correlation to modelV2 data (0.783 correlation, 0.103m RMSE)";
+CM_ SG_ 843 Left_Lane_Line_Type_S "Verified with real driving data: Bit 0-1 of byte 0 encodes lane type (0=NoDisplay, 1=SolidLine, 2=DashedLine, 3=Roadside)";
+CM_ SG_ 843 Right_Lane_Line_Type_S "Verified with real driving data: Bit 2-3 of byte 0 encodes lane type (0=NoDisplay, 1=SolidLine, 2=DashedLine, 3=Roadside)";
+
 BO_ 884 RADAR_MRR: 8 XXX
  SG_ TargetID : 1|2@0+ (1,0) [0|3] "" XXX
  SG_ Type : 7|4@0+ (1,0) [0|15] "" XXX
@@ -231,5 +245,7 @@ VAL_ 814 AccOverrideOrStandstill 0 "Off" 1 "Passive" 2 "StandBy" 3 "ActiveContro
 VAL_ 814 EspBehaviour 0 "Softoff" 1 "Fastoff" 2 "Immediateoff" 3 "Initial";
 VAL_ 834 DriveMode 2 "SPORT" 1 "ECO" 0 "SNOW" ;
 VAL_ 834 PowerMode 3 "HEV" 2 "FORCE_EV" 1 "EV" ;
+VAL_ 843 Left_Lane_Line_Type_S 0 "NoDisplay" 1 "SolidLine" 2 "DashedLine" 3 "Roadside" ;
+VAL_ 843 Right_Lane_Line_Type_S 0 "NoDisplay" 1 "SolidLine" 2 "DashedLine" 3 "Roadside" ;
 VAL_ 944 BTN_AccUpDown_Cmd 0 "NOTPRESSED" 1 "DOWN_SETSPEED" 3 "UP_RESETSPEED" ;
 

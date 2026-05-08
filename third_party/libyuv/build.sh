@@ -18,7 +18,7 @@ if [ ! -d libyuv ]; then
 fi
 
 cd libyuv
-git checkout 4a14cb2e81235ecd656e799aecaaf139db8ce4a2
+git checkout 917276084a49be726c90292ff0a6b0a3d571a6af
 
 # build
 cmake .

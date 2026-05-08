@@ -17,12 +17,12 @@ VideoWriter::VideoWriter(const char *path, const char *filename, bool remuxing, 
   LOGD("encoder_open %s remuxing:%d", this->vid_path.c_str(), this->remuxing);
   if (this->remuxing) {
     bool raw = (codec == cereal::EncodeIndex::Type::BIG_BOX_LOSSLESS);
-    avformat_alloc_output_context2(&this->ofmt_ctx, NULL, raw ? "matroska" : NULL, this->vid_path.c_str());
+    bool hevc = (codec == cereal::EncodeIndex::Type::FULL_H_E_V_C);
+    avformat_alloc_output_context2(&this->ofmt_ctx, NULL, raw ? "matroska" : hevc ? "hevc" : NULL, this->vid_path.c_str());
     assert(this->ofmt_ctx);
 
     // set codec correctly. needed?
-    assert(codec != cereal::EncodeIndex::Type::FULL_H_E_V_C);
-    const AVCodec *avcodec = avcodec_find_encoder(raw ? AV_CODEC_ID_FFVHUFF : AV_CODEC_ID_H264);
+    const AVCodec *avcodec = avcodec_find_encoder(raw ? AV_CODEC_ID_FFVHUFF : hevc ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
     assert(avcodec);
 
     this->codec_ctx = avcodec_alloc_context3(avcodec);

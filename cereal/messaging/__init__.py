@@ -243,6 +243,9 @@ class PubMaster:
 
   def send(self, s: str, dat: Union[bytes, capnp.lib.capnp._DynamicStructBuilder]) -> None:
     if not isinstance(dat, bytes):
+      # Clear the write flag to avoid the warning about multiple writes
+      if hasattr(dat, 'clear_write_flag'):
+        dat.clear_write_flag()
       dat = dat.to_bytes()
     self.sock[s].send(dat)
 

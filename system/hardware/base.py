@@ -6,11 +6,14 @@ from cereal import log
 
 NetworkType = log.DeviceState.NetworkType
 
+
 class LPAError(RuntimeError):
   pass
 
+
 class LPAProfileNotFoundError(LPAError):
   pass
+
 
 @dataclass
 class Profile:
@@ -19,11 +22,12 @@ class Profile:
   enabled: bool
   provider: str
 
+
 @dataclass
 class ThermalZone:
   # a zone from /sys/class/thermal/thermal_zone*
-  name: str             # a.k.a type
-  scale: float = 1000.  # scale to get degrees in C
+  name: str  # a.k.a type
+  scale: float = 1000.0  # scale to get degrees in C
   zone_number = -1
 
   def read(self) -> float:
@@ -39,8 +43,9 @@ class ThermalZone:
     try:
       with open(f"/sys/devices/virtual/thermal/thermal_zone{self.zone_number}/temp") as f:
         return int(f.read()) / self.scale
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
       return 0
+
 
 @dataclass
 class ThermalConfig:
@@ -63,6 +68,7 @@ class ThermalConfig:
         else:
           ret[f.name + "TempC"] = v.read()
     return ret
+
 
 class LPABase(ABC):
   @abstractmethod
@@ -88,6 +94,7 @@ class LPABase(ABC):
   @abstractmethod
   def switch_profile(self, iccid: str) -> None:
     pass
+
 
 class HardwareBase(ABC):
   @staticmethod

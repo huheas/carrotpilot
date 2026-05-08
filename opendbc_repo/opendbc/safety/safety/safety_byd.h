@@ -23,6 +23,11 @@
 #define BYD_CANBUS_MPC  2               // MPC总线
 
 static bool byd_eps_cruiseactivated = false;
+static bool byd_block_original_acc = false;  // 持续阻断原车 ACC_CMD 的标志
+
+// 通过 ACC_CMD 消息中的 AccControlActive 字段控制阻断
+// AccControlActive=1: 设置阻断标志，持续阻断原车 ACC_CMD
+// AccControlActive=0: 清除断标志，恢复原车 ACC 控制
 
 typedef enum {
   HAN_TANG_DMEV,
@@ -109,9 +114,36 @@ static bool byd_tx_hook(const CANPacket_t *to_send) {
   };
 
   bool tx = true;
+  int bus = GET_BUS(to_send);
+  int addr = GET_ADDR(to_send);
 
-  if (GET_BUS(to_send) == BYD_CANBUS_ESC) {
-    int addr = GET_ADDR(to_send);
+  // 检测 ACC_CMD 发送，通过 AccControlActive 字段控制阻断
+  // AccControlActive 在字节 5 的位 4 (Motorola 格式，起始位 44)
+  if (addr == BYD_CANADDR_ACC_CMD) {
+    int acc_control_active = (GET_BYTE(to_send, 5) >> 4) & 0x1U;
+    if (acc_control_active == 1) {
+      // openpilot 发送 AccControlActive=1，设置阻断标志
+      byd_block_original_acc = true;
+    } else {
+      // openpilot 发送 AccControlActive=0，清除阻断标志，恢复原车 ACC 控制
+      byd_block_original_acc = false;
+    }
+  }
+
+  if (bus == BYD_CANBUS_ESC) {
+
+    // PCM_BUTTONS safety check
+    if (addr == BYD_CANADDR_PCM_BUTTONS) {
+      int btn_up_down = (GET_BYTE(to_send, 0) >> 3) & 0x3U;
+      int btn_cancel = (GET_BYTE(to_send, 0) >> 6) & 0x1U;
+
+      bool allowed_cancel = (btn_cancel == 1);
+      bool allowed_speed_adj = (btn_up_down == 1 || btn_up_down == 3) && controls_allowed;
+
+      if (!allowed_cancel && !allowed_speed_adj && btn_up_down != 0) {
+        tx = false;
+      }
+    }
 
     if(byd_platform == SEAL) {
       if (addr == BYD_CANADDR_ACC_MPC_STATE_SEAL) {
@@ -147,15 +179,20 @@ static int byd_fwd_hook(int bus, int addr) {
 
   if (bus == BYD_CANBUS_ESC) { // if sent from esc
     bool block_esc_msg = (addr == BYD_CANADDR_ACC_EPS_STATE)
-                      || (addr == BYD_CANADDR_ACC_EPS_STATE_SEAL);
+                      || (addr == BYD_CANADDR_ACC_EPS_STATE_SEAL)
+                      || (addr == BYD_CANADDR_PCM_BUTTONS);
 
     if (!block_esc_msg) {
       bus_fwd = BYD_CANBUS_MPC;
     }
   } else if (bus == BYD_CANBUS_MPC) { // if sent from mpc
     bool block_mpc_msg = (addr == BYD_CANADDR_ACC_MPC_STATE)
-                      || (addr == BYD_CANADDR_ACC_MPC_STATE_SEAL)
-                      || (addr == BYD_CANADDR_ACC_CMD);
+                      || (addr == BYD_CANADDR_ACC_MPC_STATE_SEAL);
+
+    // 持续阻断原车 ACC_CMD：当 openpilot 设置阻断标志时，阻断原车消息转发
+    if (byd_block_original_acc && addr == BYD_CANADDR_ACC_CMD) {
+      block_mpc_msg = true;
+    }
 
     if (!block_mpc_msg) {
       bus_fwd = BYD_CANBUS_ESC;
@@ -193,12 +230,14 @@ static safety_config byd_init(uint16_t param) {
   };
 
   static const CanMsg BYD_HANDM_TX_MSGS[] = {
+    {BYD_CANADDR_PCM_BUTTONS,     BYD_CANBUS_MPC, 8},
     {BYD_CANADDR_ACC_CMD,         BYD_CANBUS_ESC, 8},
     {BYD_CANADDR_ACC_MPC_STATE,   BYD_CANBUS_ESC, 8},
     {BYD_CANADDR_ACC_EPS_STATE,   BYD_CANBUS_MPC, 8},
   };
 
   static const CanMsg BYD_SEAL_TX_MSGS[] = {
+    {BYD_CANADDR_PCM_BUTTONS,        BYD_CANBUS_MPC, 8},
     {BYD_CANADDR_ACC_CMD,            BYD_CANBUS_ESC, 8},
     {BYD_CANADDR_ACC_MPC_STATE,      BYD_CANBUS_ESC, 8},
     {BYD_CANADDR_ACC_MPC_STATE_SEAL, BYD_CANBUS_ESC, 8},

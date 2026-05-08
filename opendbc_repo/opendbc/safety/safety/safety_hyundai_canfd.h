@@ -398,7 +398,7 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *to_send) {
       violation |= longitudinal_accel_checks(desired_accel_raw, HYUNDAI_LONG_LIMITS);
       violation |= longitudinal_accel_checks(desired_accel_val, HYUNDAI_LONG_LIMITS);
       if (violation) {
-          print("long violation"); putui((uint32_t)desired_accel_raw); print(","); putui((uint32_t)desired_accel_val); print("\n");
+          print("long violation"); puth((uint32_t)desired_accel_raw); print(","); puth((uint32_t)desired_accel_val); print("\n");
       }
 
     } else {
@@ -454,7 +454,7 @@ static int hyundai_canfd_fwd_hook(int bus_num, int addr) {
           addr_list1[addr_list_count1] = addr;
           addr_list_count1++;
           print("!!!!! bus1_list=");
-          for (int j = 0; j < addr_list_count1; j++) { putui((uint32_t)addr_list1[j]); print(","); }
+          for (int j = 0; j < addr_list_count1; j++) { puth((uint32_t)addr_list1[j]); print(","); }
           print("\n");
       }
   }
@@ -469,7 +469,7 @@ static int hyundai_canfd_fwd_hook(int bus_num, int addr) {
           addr_list2[addr_list_count2] = addr;
           addr_list_count2++;
           print("@@@@ bus2_list=");
-          for (int j = 0; j < addr_list_count2; j++) { putui((uint32_t)addr_list2[j]); print(","); }
+          for (int j = 0; j < addr_list_count2; j++) { puth((uint32_t)addr_list2[j]); print(","); }
           print("\n");
       }
 #if 1
@@ -485,7 +485,7 @@ static int hyundai_canfd_fwd_hook(int bus_num, int addr) {
       //if (addr == 908) bus_fwd = -1;
       //else if (addr == 1402) bus_fwd = -1;
       //
-      // ¾Æ·¡ÄÚµåÁß ¿ÀÅä»óÇâµîÄÚµå ÀÖÀ½.. ¤»
+      // ï¿½Æ·ï¿½ï¿½Úµï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Úµï¿½ ï¿½ï¿½ï¿½ï¿½.. ï¿½ï¿½
       //if (addr == 698) bus_fwd = -1;
       //if (addr == 1848) bus_fwd = -1;
       //if (addr == 1996) bus_fwd = -1;

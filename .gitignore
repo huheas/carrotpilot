@@ -16,9 +16,6 @@ a.out
 params/
 .comma/
 tools/sim.org
-.github
-.vscode
-.qoder
 
 /docs_site/
 
@@ -116,3 +113,22 @@ system/sensord_wt/sensord_wt
 system/sensord_wt/wt_calibration_tool
 opendbc_repo/opendbc/dbc/generator/hyundai/hyundai_canfd_radar.dbc
 /opendbc_repo/opendbc/car/byd.dp
+/comma
+system/sensord_wt/sensord_wt
+system/sensord_wt/wt_calibration_tool
+tools/scripts/hotplug-virtual-display.sh
+# Temporary analysis files
+*.log
+tools/analysis/*.json
+tools/analysis/*.txt
+tools/analysis/*.md
+
+# Keep important analysis scripts
+!tools/batch_dbc_validation.py
+!tools/analyze_route_prefix.py
+!tools/generate_validation_report.py
+/apk_analysis
+/carrotapp
+/opendbc_repo/opendbc/car/byd.new
+/system/camerad.bak
+system/sensord_can/sensord_can

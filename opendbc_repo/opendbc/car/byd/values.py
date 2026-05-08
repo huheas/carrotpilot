@@ -5,14 +5,12 @@ from opendbc.car.structs import CarParams
 from opendbc.car.docs_definitions import CarHarness, CarDocs, CarParts
 from opendbc.car.fw_query_definitions import FwQueryConfig, Request, StdQueries
 
-from opendbc.car.byd.tuning import Tuning
-
 Ecu = CarParams.Ecu
 
 class CarControllerParams:
-  STEER_MAX = 300  # 增大最大转向力矩，改善转向不足导致的外切压线问题
-  STEER_DELTA_UP = 7    # 增大转向响应速度，改善过弯性能，减少外切
-  STEER_DELTA_DOWN = 10  # 增大转向恢复速度，改善连续弯道表现
+  STEER_MAX = 300
+  STEER_DELTA_UP = 7
+  STEER_DELTA_DOWN = 10
 
   STEER_DRIVER_ALLOWANCE = 68
   STEER_DRIVER_MULTIPLIER = 3
@@ -20,7 +18,7 @@ class CarControllerParams:
   STEER_ERROR_MAX = 50
 
   STEER_STEP = 2  #100/2=50hz
-  STEER_SOFTSTART_STEP = 3 # 减少软启动步长，防止低速摆动 (20ms*300/3=2000ms)
+  STEER_SOFTSTART_STEP = 6 # 20ms(50Hz) * 300 / 6 = 1000ms. This means the clip ceiling will be increased to 300 in 1000ms
 
   ACC_STEP = 2    #50hz
 
@@ -29,7 +27,7 @@ class CarControllerParams:
 
   K_DASHSPEED = 0.0719088 #convert pulse to kph
 
-  USE_STEERING_SPEED_LIMITER = True  # 启用转向速度限制器，改善低速稳定性
+  USE_STEERING_SPEED_LIMITER = False
 
   # op long control
   K_accel_jerk_upper = 0.1
@@ -37,37 +35,6 @@ class CarControllerParams:
   K_jerk_xp =            [   4,   10,   20,   40,   80]  # meters
   K_jerk_base_lower_fp = [-2.3, -1.8, -1.4, -1.0, -0.4]
   K_jerk_base_upper_fp = [ 0.8,  0.7,  0.6,  0.3,  0.2]
-
-  # 从tuning.py导入的参数
-  STEERING_ANGLE_OFFSET = Tuning.STEERING_ANGLE_OFFSET
-  STEER_RATIO_MULTIPLIER = Tuning.STEER_RATIO_MULTIPLIER
-  STEER_RATIO_BP = Tuning.STEER_RATIO_BP
-  STEER_RATIO_FP = Tuning.STEER_RATIO_FP
-  LEFT_TURN_COMPENSATION = Tuning.LEFT_TURN_COMPENSATION
-  RIGHT_TURN_COMPENSATION = Tuning.RIGHT_TURN_COMPENSATION
-  DASHSPEED_BP = Tuning.DASHSPEED_BP
-  DASHSPEED_FP = Tuning.DASHSPEED_FP
-
-  # Longitudinal control parameters from tuning.py
-  K_ACCEL_BP = Tuning.K_ACCEL_BP
-  K_ACCEL_POS_4BAR = Tuning.K_ACCEL_POS_4BAR
-  K_ACCEL_NEG_4BAR = Tuning.K_ACCEL_NEG_4BAR
-  K_ACCEL_POS_3BAR = Tuning.K_ACCEL_POS_3BAR
-  K_ACCEL_NEG_3BAR = Tuning.K_ACCEL_NEG_3BAR
-  K_ACCEL_POS_2BAR = Tuning.K_ACCEL_POS_2BAR
-  K_ACCEL_NEG_2BAR = Tuning.K_ACCEL_NEG_2BAR
-  K_ACCEL_POS_1BAR = Tuning.K_ACCEL_POS_1BAR
-  K_ACCEL_NEG_1BAR = Tuning.K_ACCEL_NEG_1BAR
-
-  # Steering parameters
-  STEER_PRESSED_THRESHOLD = Tuning.STEER_PRESSED_THRESHOLD
-
-  # EPS fault settings
-  DISABLE_EPS_WARNING = Tuning.DISABLE_EPS_WARNING
-  DISABLE_EPS_TEMPORARY_FAULT = Tuning.DISABLE_EPS_TEMPORARY_FAULT
-  DISABLE_EPS_PERMANENT_FAULT = Tuning.DISABLE_EPS_PERMANENT_FAULT
-
-  DISABLE_PARKBRAKE = Tuning.DISABLE_PARKBRAKE
 
   def __init__(self, CP):
     pass
@@ -95,13 +62,11 @@ class BydPlatformConfig(PlatformConfig):
 class CAR(Platforms):
   BYD_HAN_DM_20 = BydPlatformConfig(
     [BydCarDocs("BYD HAN DM 20")],
-    CarSpecs(mass=2080., wheelbase=2.920, steerRatio=15.5, centerToFrontRatio=0.42, tireStiffnessFactor=0.95),
-    dbc_dict={Bus.pt: "byd_han_dmev_2020"}
+    CarSpecs(mass=2080., wheelbase=2.920, steerRatio=16.8, centerToFrontRatio=0.44, tireStiffnessFactor=1.0),
   )
   BYD_HAN_EV_20 = BydPlatformConfig(
     [BydCarDocs("BYD HAN EV 20")],
-    CarSpecs(mass=2100., wheelbase=2.959, steerRatio=15.5, centerToFrontRatio=0.42, tireStiffnessFactor=0.95),
-    dbc_dict={Bus.pt: "byd_han_dmev_2020"}
+    CarSpecs(mass=2100., wheelbase=2.959, steerRatio=16.8, centerToFrontRatio=0.44, tireStiffnessFactor=1.0),
   )
 
   #The following parameters are likely be incorrect, developers please fill and fix them.

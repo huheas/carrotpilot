@@ -1,0 +1,14 @@
+Import("env", "envCython", "arch", "common", "messaging")
+
+libs = []
+
+if arch != "Darwin":
+  libs.append("rt")
+
+env.Program("sensord_can", [
+    "sensord_can.cc",
+    "sensors/can_sensor.cc",
+    "sensors/universal_can_sensor.cc",
+  ],
+  LIBS=envCython["LIBS"] + common + messaging + libs
+)

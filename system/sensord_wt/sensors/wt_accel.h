@@ -24,6 +24,11 @@ public:
   int shutdown() { enabled = false; return 0; }
   bool is_data_valid(uint64_t current_ts) { return enabled; }
 
+  // 获取最近一次的原始值（供 verbose 打印使用）
+  void get_last_values(double &ax, double &ay, double &az) const {
+    ax = last_accel_x; ay = last_accel_y; az = last_accel_z;
+  }
+
 protected:
   void update_accel_data();
 };

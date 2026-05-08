@@ -243,11 +243,11 @@ static bool tx_msg_safety_check(const CANPacket_t *to_send, const CanMsg msg_lis
   }
   if (!allowed && _prev_not_allowed_addr != addr && len > 0) {
     print("allowed addr = ");
-    for(int i=0;i<len;i++) {putui((uint32_t)msg_list[i].addr); print(",");}
+    for(int i=0;i<len;i++) {puth((uint32_t)msg_list[i].addr); print(",");}
     print("\nbus = ");
-    for(int i=0;i<len;i++) {putui((uint32_t)msg_list[i].bus); print(",");}
+    for(int i=0;i<len;i++) {puth((uint32_t)msg_list[i].bus); print(",");}
     print("\nlen = ");
-    for(int i=0;i<len;i++) {putui((uint32_t)msg_list[i].len); print(",");}
+    for(int i=0;i<len;i++) {puth((uint32_t)msg_list[i].len); print(",");}
     print("\n");
     _prev_not_allowed_addr = addr;
   }
@@ -271,17 +271,17 @@ bool safety_tx_hook(CANPacket_t *to_send) {
       if (!allowed) print("nowallowed,");
       if (!safety_allowed) print("safety_allowed,");
       print("addr = ");
-      putui((uint32_t)addr);
+      puth((uint32_t)addr);
       print(" bus=");
-      putui((uint32_t)bus);
+      puth((uint32_t)bus);
       print(" len=");
-      putui((uint32_t)length);
+      puth((uint32_t)length);
       print(" ctrl=");
-      putui((uint32_t)controls_allowed);
+      puth((uint32_t)controls_allowed);
       print(" main=");
-      putui((uint32_t)acc_main_on);
+      puth((uint32_t)acc_main_on);
       print(" rely=");
-      putui((uint32_t)relay_malfunction);
+      puth((uint32_t)relay_malfunction);
       print("\n");
       _prev_error_addr = addr;
   }

@@ -63,14 +63,19 @@ def listdir_by_creation(d: str) -> list[str]:
     return []
 
 def clear_locks(root: str) -> None:
-  for logdir in os.listdir(root):
-    path = os.path.join(root, logdir)
-    try:
-      for fname in os.listdir(path):
-        if fname.endswith(".lock"):
-          os.unlink(os.path.join(path, fname))
-    except OSError:
-      cloudlog.exception("clear_locks failed")
+  try:
+    for logdir in os.listdir(root):
+      path = os.path.join(root, logdir)
+      if not os.path.isdir(path):
+        continue
+      try:
+        for fname in os.listdir(path):
+          if fname.endswith(".lock"):
+            os.unlink(os.path.join(path, fname))
+      except OSError:
+        cloudlog.exception("clear_locks failed")
+  except OSError:
+    cloudlog.exception("clear_locks failed to list root directory")
 
 
 class Uploader:

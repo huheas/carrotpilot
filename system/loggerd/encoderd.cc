@@ -32,14 +32,14 @@ bool sync_encoders(EncoderdState *s, VisionStreamType cam_type, uint32_t frame_i
     update_max_atomic(s->start_frame_id, frame_id + 2);
     if (std::exchange(s->camera_ready[cam_type], true) == false) {
       ++s->encoders_ready;
-      LOGD("camera %d encoder ready", cam_type);
+      // LOGD("camera %d encoder ready", cam_type); // Debug message disabled
     }
     return false;
   } else {
     if (s->max_waiting == 1) update_max_atomic(s->start_frame_id, frame_id);
     bool synced = frame_id >= s->start_frame_id;
     s->camera_synced[cam_type] = synced;
-    if (!synced) LOGD("camera %d waiting for frame %d, cur %d", cam_type, (int)s->start_frame_id, frame_id);
+    // if (!synced) LOGD("camera %d waiting for frame %d, cur %d", cam_type, (int)s->start_frame_id, frame_id); // Debug message disabled
     return synced;
   }
 }

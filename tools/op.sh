@@ -249,12 +249,12 @@ function op_setup() {
   fi
   et="$(date +%s)"
   echo -e " ↳ [${GREEN}✔${NC}] Files pulled successfully in $((et - st)) seconds."
-  sudo cp -f $OPENPILOT_ROOT/tools/carrot2-v9.desktop /usr/share/applications/
-  mkdir -p /home/$LOGNAME/.config/autostart/
-  cp -f $OPENPILOT_ROOT/tools/autostart_lauch.desktop /home/$LOGNAME/.config/autostart/
-  sudo sh -c "sed -i 's|OPENPILOT_ROOT|$OPENPILOT_ROOT|g' /usr/share/applications/carrot2-v9.desktop /home/$LOGNAME/.config/autostart/autostart_lauch.desktop $OPENPILOT_ROOT/tools/scripts/hotplug-virtual-display.sh"
-  sudo crontab -l | grep -v "hotplug-virtual-display.sh"|sudo crontab -
-  (sudo crontab -l 2>/dev/null; echo "@reboot /usr/bin/bash -x $OPENPILOT_ROOT/tools/scripts/hotplug-virtual-display.sh > /var/log/display-switcher.log 2>&1") |sudo crontab -
+  #sudo cp -f $OPENPILOT_ROOT/tools/carrot2-v9.desktop /usr/share/applications/
+  #mkdir -p /home/$LOGNAME/.config/autostart/
+  #cp -f $OPENPILOT_ROOT/tools/autostart_lauch.desktop /home/$LOGNAME/.config/autostart/
+  #sudo sh -c "sed -i 's|OPENPILOT_ROOT|$OPENPILOT_ROOT|g' /usr/share/applications/carrot2-v9.desktop /home/$LOGNAME/.config/autostart/autostart_lauch.desktop $OPENPILOT_ROOT/tools/scripts/hotplug-virtual-display.sh"
+  #sudo crontab -l | grep -v "hotplug-virtual-display.sh"|sudo crontab -
+  #(sudo crontab -l 2>/dev/null; echo "@reboot /usr/bin/bash -x $OPENPILOT_ROOT/tools/scripts/hotplug-virtual-display.sh > /var/log/display-switcher.log 2>&1") |sudo crontab -
 
   op_check
 }

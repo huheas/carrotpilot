@@ -8,43 +8,59 @@
 std::unique_ptr<WTDataManager> WTDataManager::instance = nullptr;
 std::mutex WTDataManager::instance_mutex;
 
-// 静态回调函数实现
-static void serial_write_callback(uint8_t *data, uint32_t len) {
-  // 实现串口写功能 - 在这个实现中可能不需要写回功能
-  // 如果需要，可以通过全局变量或其他方式访问串口文件描述符
-  LOGD("WT SDK serial write callback called with %d bytes", len);
-}
+// ─── 串口读取后台线程：持续读串口并送入 WT SDK ─────────
+// 此线程独立运行，不需要被其他线程阻塞，保证数据流不断。
+void WTDataManager::reader_loop() {
+  LOGD("[WTDataManager] Reader thread started");
+  unsigned char buffer[256];
 
-static void reg_update_callback(uint32_t reg, uint32_t reg_num) {
-  // 实现寄存器更新回调 - 当WT SDK更新寄存器时调用
-  LOGD("WT SDK register update: reg=%d, reg_num=%d", reg, reg_num);
-}
+  while (reader_running.load()) {
+    if (serial_fd < 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;
+    }
 
-static void delay_ms_callback(uint16_t ms) {
-  // 实现延时功能
-  usleep(ms * 1000);
+    int len = serial_read_data(serial_fd, buffer, sizeof(buffer));
+    if (len > 0) {
+      // 将接收到的数据传递给 WT SDK 处理
+      for (int i = 0; i < len; i++) {
+        WitSerialDataIn(buffer[i]);
+      }
+
+      // 更新缓存标记
+      last_update_time.store(nanos_since_boot());
+      data_valid.store(true);
+    } else {
+      // 串口没有数据时短暂等待，避免空转
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+  }
+  LOGD("[WTDataManager] Reader thread stopped");
 }
 
 WTDataManager::WTDataManager(const std::string& device, int baud)
     : device_path(device), serial_fd(-1),
-      last_update_time(0), data_valid(false) {
+      last_update_time(0), data_valid(false), reader_running(false) {
 
-  // 直接实现串口初始化，而不是依赖抽象类
   serial_fd = serial_open(device.c_str(), baud);
   if (serial_fd < 0) {
     LOGE("Failed to open WT serial device: %s", device.c_str());
-  } else {
-    LOGD("WT Data Manager initialized successfully on %s @ %d baud",
-         device.c_str(), baud);
-
-    // 添加 WT SDK 初始化
-    WitInit(WIT_PROTOCOL_NORMAL, 0x50);  // 初始化协议和设备地址
-    WitSerialWriteRegister(serial_write_callback);  // 设置串口写回调
-    WitRegisterCallBack(reg_update_callback);  // 设置寄存器更新回调
-    WitDelayMsRegister(delay_ms_callback);  // 设置延时回调
-
-    LOGD("WT SDK initialized with protocol and callbacks");
+    return;
   }
+
+  LOGD("WT serial opened on %s @ %d baud, starting SDK + reader thread", device.c_str(), baud);
+
+  // 初始化 WT SDK
+  // JY901B 串口协议格式为 0x55 + 类型 + 数据，与 JY61 相同
+  WitInit(WIT_PROTOCOL_JY61, 0x50);
+  WitDelayMsRegister([](uint16_t ms) { usleep(ms * 1000); });
+  WitRegisterCallBack([](uint32_t reg, uint32_t reg_num) {
+    // SDK 解析到传感器数据后会触发此回调
+  });
+
+  // 启动后台读取线程
+  reader_running.store(true);
+  reader_thread = std::thread(&WTDataManager::reader_loop, this);
 }
 
 WTDataManager* WTDataManager::getInstance(const std::string& device, int baud) {
@@ -60,40 +76,30 @@ WTDataManager* WTDataManager::getInstance() {
   return instance.get();
 }
 
-bool WTDataManager::updateData() {
-  if (serial_fd < 0) return false;
-
-  std::lock_guard<std::mutex> lock(data_mutex);
-
-  // 直接实现串口数据读取
-  unsigned char buffer[256];
-  int len = serial_read_data(serial_fd, buffer, sizeof(buffer));
-
-  if (len > 0) {
-    // 将接收到的数据传递给 WT SDK 处理
-    for (int i = 0; i < len; i++) {
-      WitSerialDataIn(buffer[i]);
-    }
-    last_update_time = nanos_since_boot();
-    data_valid = true;
-    return true;
-  }
-
-  return false;
+bool WTDataManager::getLatestData() const {
+  // 直接读取最新数据，不阻塞。
+  // 只检查是否收到过数据，不读串口。
+  return data_valid.load() && (serial_fd >= 0);
 }
 
-bool WTDataManager::isDataValid() {
-  std::lock_guard<std::mutex> lock(data_mutex);
-  return data_valid && (serial_fd >= 0);
+bool WTDataManager::isDataValid() const {
+  return data_valid.load() && (serial_fd >= 0);
 }
 
-uint64_t WTDataManager::getLastUpdateTime() {
-  std::lock_guard<std::mutex> lock(data_mutex);
+uint64_t WTDataManager::getLastUpdateTime() const {
   return last_update_time;
 }
 
 WTDataManager::~WTDataManager() {
+  // 停止后台读取线程
+  if (reader_running.load()) {
+    reader_running.store(false);
+    if (reader_thread.joinable()) {
+      reader_thread.join();
+    }
+  }
   if (serial_fd >= 0) {
     close(serial_fd);
+    serial_fd = -1;
   }
 }

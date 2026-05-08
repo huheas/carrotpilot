@@ -29,19 +29,16 @@ void WT_Gyro::update_gyro_data() {
 }
 
 bool WT_Gyro::get_event(MessageBuilder &msg, uint64_t ts) {
-  LOGD("WT_Gyro::get_event called, enabled=%s", enabled ? "true" : "false");
-
   if (!enabled) {
     return false;
   }
 
-  // 从统一数据管理器获取数据
   WTDataManager* data_manager = WTDataManager::getInstance();
-  if (!data_manager->updateData() || !data_manager->isDataValid()) {
-    return false;
+  if (!data_manager->getLatestData()) {
+    return false;  // 还未收到过数据
   }
 
-  // 更新陀螺仪数据
+  // 更新陀螺仪数据（sReg 由后台线程的 WT SDK 填充，无锁读取）
   update_gyro_data();
 
   LOGD("WT_Gyro: Building gyroscope message, enabled=%s", enabled ? "true" : "false");
@@ -54,16 +51,28 @@ bool WT_Gyro::get_event(MessageBuilder &msg, uint64_t ts) {
   event.setTimestamp(ts == 0 ? nanos_since_boot() : ts);
 
   auto gyro = event.initGyroUncalibrated();
-  // WT传感器安装方向映射到标准车辆坐标系
-  // locationd转换: meas = [-v[2], -v[1], -v[0]]
-  // WT轴向: Y轴(前进-俯仰), X轴(左右-横滚), Z轴(上下-偏航)
-  // 目标车辆坐标系: meas[0]=roll(横滚), meas[1]=pitch(俯仰), meas[2]=yaw(偏航)
   //
-  // 修复：确保陀螺仪轴映射正确
-  // v[0] → meas[2] = yaw(偏航) → 使用WT的Z轴
-  // v[1] → meas[1] = pitch(俯仰) → 使用WT的Y轴
-  // v[2] → meas[0] = roll(横滚) → 使用WT的X轴
-  gyro.setV({{(float)last_gyro_z, (float)(-last_gyro_y), (float)(-last_gyro_x)}});
+  // WT 传感器物理轴方向（与加速度计相同，实测验证）:
+  //   WT_X 正 = 物理左方向
+  //   WT_Y 正 = 物理前进方向
+  //   WT_Z 正 = 物理向上方向
+  //
+  // openpilot 陀螺仪期望（locationd）:
+  //   meas_gyro[0] = roll  = 绕前进轴(X)旋转，右侧向下为正
+  //   meas_gyro[1] = pitch = 绕右侧轴(Y)旋转，机头向上为正
+  //   meas_gyro[2] = yaw   = 绕向上轴(Z)旋转，向左转为正
+  //
+  // 结合加速度计物理轴推导：
+  // 实车验证：WT_Y正方向 = 车辆后退，所以绕"前进轴"旋转 = 绕(-WT_Y)旋转
+  //   roll  = 绕(-WT_Y)轴旋转 → -WT_GY方向
+  //   pitch = 绕(-WT_X)轴旋转 → -WT_GX方向
+  //   yaw   = 绕WT_Z轴旋转   → WT_GZ方向
+  //
+  // locationd 变换: meas = [-v[2], -v[1], -v[0]]
+  //   meas[0] = roll  = -WT_GY → -v[2]=-WT_GY → v[2]=+gy
+  //   meas[1] = pitch = -WT_GX → -v[1]=-WT_GX → v[1]=+gx
+  //   meas[2] = yaw   = +WT_GZ → -v[0]=WT_GZ  → v[0]=-gz
+  gyro.setV({{(float)(-last_gyro_z), (float)(last_gyro_x), (float)(last_gyro_y)}});
   gyro.setStatus(true);
 
   LOGD("WT_Gyro: Message built successfully");

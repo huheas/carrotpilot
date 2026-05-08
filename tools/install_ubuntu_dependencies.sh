@@ -38,6 +38,14 @@ function install_ubuntu_common_requirements() {
     libavdevice-dev \
     libavutil-dev \
     libavfilter-dev \
+    libva-dev \
+    libva-drm2 \
+    libva-x11-2 \
+    libva-wayland2 \
+    vainfo \
+    mesa-vulkan-drivers \
+    libvulkan1 \
+    libvulkan-dev \
     libbz2-dev \
     libeigen3-dev \
     libffi-dev \

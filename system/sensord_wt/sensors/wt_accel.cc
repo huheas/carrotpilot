@@ -31,13 +31,12 @@ bool WT_Accel::get_event(MessageBuilder &msg, uint64_t ts) {
     return false;
   }
 
-  // 从统一数据管理器获取数据
   WTDataManager* data_manager = WTDataManager::getInstance();
-  if (!data_manager->updateData() || !data_manager->isDataValid()) {
-    return false;
+  if (!data_manager->getLatestData()) {
+    return false;  // 还未收到过数据
   }
 
-  // 更新加速度数据
+  // 更新加速度数据（sReg 由后台线程的 WT SDK 填充，无锁读取）
   update_accel_data();
 
   // 构建 accelerometer 消息
@@ -54,23 +53,33 @@ bool WT_Accel::get_event(MessageBuilder &msg, uint64_t ts) {
   // 设置加速度数据
   auto acceleration = accel.initAcceleration();
   auto v = acceleration.initV(3);
-  // WT传感器安装方向映射到标准车辆坐标系
-  // locationd转换: meas = [-v[2], -v[1], -v[0]]
-  // WT轴向: Y轴(前进), X轴(左右), Z轴(上下)
-  // 目标: meas[0]=X轴(前进), meas[1]=Y轴(左右), meas[2]=Z轴(上下)
   //
-  // 修复：根据WT传感器安装方向正确映射轴向
-  // WT安装：Y轴(前进), X轴(左右), Z轴(上下)
-  // locationd转换: meas = [-v[2], -v[1], -v[0]]
-  // 目标：meas[0]=前进, meas[1]=左右, meas[2]=上下(重力+9.8)
+  // WT 传感器物理轴方向（实测验证）:
+  //   WT_X 正 = 物理左方向
+  //   WT_Y 正 = 物理前进方向
+  //   WT_Z 正 = 物理向上方向（静止时 WT_Z ≈ +9.87）
   //
-  // 正确映射：
-  // v[0] → meas[2] = 上下轴 → 使用WT的Z轴，静止时应为+9.8
-  // v[1] → meas[1] = 左右轴 → 使用WT的X轴
-  // v[2] → meas[0] = 前进轴 → 使用WT的Y轴
-  v.set(0, last_accel_z);      // WT Z轴 → v[0] → meas[2] = 车辆Z轴(垂直)
-  v.set(1, -last_accel_x);     // WT X轴 → v[1] → meas[1] = 车辆Y轴(横向)
-  v.set(2, -last_accel_y);     // WT Y轴 → v[2] → meas[0] = 车辆X轴(纵向)
+  // openpilot 设备坐标系（locationd 期望）:
+  //   meas[0] = X 前进（前进为正）
+  //   meas[1] = Y 右侧（右为正）
+  //   meas[2] = Z 向上（静止时重力 ≈ -9.81）
+  //
+  // 实车验证结论（场景2/3坡道测试）:
+  //   WT_Y 正方向 = 车辆【后退】方向（传感器反装）
+  //   因此 X前进 = -WT_Y，需要 v[2] = +WT_Y
+  //
+  // locationd 变换: meas = [-v[2], -v[1], -v[0]]
+  //   meas[0] = -v[2] = X前进 = -WT_Y  → v[2] = +WT_Y
+  //   meas[1] = -v[1] = Y右侧 = -WT_X  → v[1] = +WT_X
+  //   meas[2] = -v[0] = Z上   = -WT_Z  → v[0] = +WT_Z
+  //
+  // 验证（静止，车头朝上坡道）:
+  //   meas[0] = -(+WT_Y) = -0.40 < 0  ✓（上坡重力向后，X前进<0）
+  //   meas[1] = -(+WT_X) = +0.62 ≈ 0  ✓
+  //   meas[2] = -(+WT_Z) = -9.87 ≈ -9.81  ✓
+  v.set(0, last_accel_z);       // +WT_Z → meas[2] = -WT_Z ≈ -9.81 ✓
+  v.set(1, last_accel_x);       // +WT_X → meas[1] = -WT_X = Y右  ✓
+  v.set(2, last_accel_y);       // +WT_Y → meas[0] = -WT_Y = X前进 ✓（WT_Y正=后退）
   acceleration.setStatus(0);
 
   return true;

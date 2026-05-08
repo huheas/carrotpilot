@@ -28,10 +28,9 @@ bool WT_Temp::get_event(MessageBuilder &msg, uint64_t ts) {
     return false;
   }
 
-  // 从统一数据管理器获取数据
   WTDataManager* data_manager = WTDataManager::getInstance();
-  if (!data_manager->updateData() || !data_manager->isDataValid()) {
-    return false;
+  if (!data_manager->getLatestData()) {
+    return false;  // 还未收到过数据
   }
 
   // 更新温度数据

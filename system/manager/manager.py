@@ -19,8 +19,9 @@ from openpilot.common.swaglog import cloudlog, add_file_handler
 from openpilot.system.version import get_build_metadata, terms_version, training_version
 from openpilot.system.hardware.hw import Paths
 
+
 def get_default_params():
-  default_params : list[tuple[str, str | bytes]] = [
+  default_params: list[tuple[str, str | bytes]] = [
     # kans
     ("LongPitch", "1"),
     ("EVTable", "1"),
@@ -33,12 +34,9 @@ def get_default_params():
     ("LongitudinalPersonality", str(log.LongitudinalPersonality.standard)),
     ("IsMetric", "1"),
     ("RecordAudio", "1"),
-
     ("SearchInput", "0"),
     ("GMapKey", "0"),
     ("MapboxStyle", "0"),
-
-
     ("LongitudinalPersonalityMax", "3"),
     ("ShowDebugUI", "0"),
     ("ShowTpms", "1"),
@@ -65,18 +63,16 @@ def get_default_params():
     ("AutoEngage", "0"),
     ("DisableMinSteerSpeed", "0"),
     ("SoftHoldMode", "0"),
-
     ("AutoSpeedUptoRoadSpeedLimit", "0"),
     ("AutoRoadSpeedAdjust", "50"),
     ("AutoCurveSpeedLowerLimit", "30"),
-    ("AutoCurveSpeedFactor", "120"),
+    ("AutoCurveSpeedFactor", "100"),
     ("AutoCurveSpeedAggressiveness", "100"),
-
-    ("AutoTurnControl", "0"),
+    ("AutoTurnControl", "1"),
     ("AutoTurnControlSpeedTurn", "20"),
+    ("AutoTurnControlSpeedFork", "70"),
     ("AutoTurnControlTurnEnd", "6"),
     ("AutoTurnMapChange", "0"),
-
     ("AutoNaviSpeedCtrlEnd", "7"),
     ("AutoNaviSpeedCtrlMode", "2"),
     ("AutoNaviSpeedBumpTime", "1"),
@@ -89,8 +85,8 @@ def get_default_params():
     ("CarrotSmartSpeedControl", "0"),
     ("MapTurnSpeedFactor", "90"),
     ("ModelTurnSpeedFactor", "0"),
-    ("StoppingAccel", "0"),
-    ("StopDistanceCarrot", "550"),
+    ("StoppingAccel", "200"),
+    ("StopDistanceCarrot", "350"),
     ("JLeadFactor3", "0"),
     ("CruiseButtonMode", "0"),
     ("CancelButtonMode", "0"),
@@ -120,7 +116,7 @@ def get_default_params():
     ("LongTuningKiV", "0"),
     ("LongTuningKf", "100"),
     ("LongActuatorDelay", "20"),
-    ("VEgoStopping", "50"),
+    ("VEgoStopping", "15"),
     ("RadarReactionFactor", "100"),
     ("EnableRadarTracks", "0"),
     ("RadarLatFactor", "0"),
@@ -131,19 +127,24 @@ def get_default_params():
     ("CanfdDebug", "0"),
     ("SoundVolumeAdjust", "100"),
     ("SoundVolumeAdjustEngage", "10"),
-    ("TFollowGap1", "110"),
-    ("TFollowGap2", "120"),
-    ("TFollowGap3", "140"),
-    ("TFollowGap4", "160"),
-    ("DynamicTFollow", "0"),
+    ("TFollowGap1", "85"),
+    ("TFollowGap2", "95"),
+    ("TFollowGap3", "110"),
+    ("TFollowGap4", "125"),
+    ("DynamicTFollow", "1"),
     ("AChangeCostStarting", "10"),
-    ("TrafficStopDistanceAdjust", "400"),
+    ("TrafficStopDistanceAdjust", "250"),
     ("DynamicTFollowLC", "100"),
     ("HapticFeedbackWhenSpeedCamera", "0"),
     ("UseLaneLineSpeed", "0"),
     ("PathOffset", "0"),
     ("UseLaneLineCurveSpeed", "0"),
     ("AdjustLaneOffset", "0"),
+    ("AdjustCurveOffset", "0"),
+    ("LaneCenterStrength", "50"),
+    ("AutoLaneCenterEnabled", "1"),
+    ("AutoLaneCenterKp", "50"),
+    ("AutoLaneCenterKi", "35"),
     ("LaneChangeNeedTorque", "0"),
     ("LaneChangeDelay", "0"),
     ("LaneChangeBsd", "0"),
@@ -151,10 +152,10 @@ def get_default_params():
     ("LateralTorqueCustom", "0"),
     ("LateralTorqueAccelFactor", "2500"),
     ("LateralTorqueFriction", "100"),
-    ("LateralTorqueKpV", "100"),
+    ("LateralTorqueKpV", "92"),
     ("LateralTorqueKiV", "10"),
-    ("LateralTorqueKf", "100"),
-    ("LateralTorqueKd", "0"),
+    ("LateralTorqueKf", "75"),
+    ("LateralTorqueKd", "12"),
     ("LatMpcPathCost", "200"),
     ("LatMpcMotionCost", "7"),
     ("LatMpcAccelCost", "120"),
@@ -166,7 +167,8 @@ def get_default_params():
     ("CustomSteerDeltaDown", "0"),
     ("CustomSteerDeltaUpLC", "0"),
     ("CustomSteerDeltaDownLC", "0"),
-    ("SpeedFromPCM", "2"),
+    ("SpeedFromPCM", "4"),
+    ("BydButtonMode", "1"),
     ("SteerActuatorDelay", "0"),
     ("LatSmoothSec", "13"),
     ("MaxTimeOffroadMin", "60"),
@@ -176,7 +178,7 @@ def get_default_params():
     ("MuteSeatbelt", "0"),
     ("RecordRoadCam", "0"),
     ("HDPuse", "0"),
-    ("CruiseOnDist", "400"),
+    ("CruiseOnDist", "200"),
     ("HotspotOnBoot", "0"),
     ("SoftwareMenu", "1"),
     ("CustomSR", "0"),
@@ -185,6 +187,7 @@ def get_default_params():
     ("NNFFLite", "0"),
   ]
   return default_params
+
 
 def set_default_params():
   params = Params()
@@ -200,10 +203,12 @@ def set_default_params():
     params.put(k, v)
     print(f"SetToDefault[{k}]={v}")
 
+
 def get_default_params_key():
   default_params = get_default_params()
   all_keys = [key for key, _ in default_params]
   return all_keys
+
 
 def manager_init() -> None:
   save_bootlog()
@@ -255,22 +260,24 @@ def manager_init() -> None:
   else:
     raise Exception(f"Registration failed for device {serial}")
   os.environ['DONGLE_ID'] = dongle_id  # Needed for swaglog
-  os.environ['GIT_ORIGIN'] = build_metadata.openpilot.git_normalized_origin # Needed for swaglog
-  os.environ['GIT_BRANCH'] = build_metadata.channel # Needed for swaglog
-  os.environ['GIT_COMMIT'] = build_metadata.openpilot.git_commit # Needed for swaglog
+  os.environ['GIT_ORIGIN'] = build_metadata.openpilot.git_normalized_origin  # Needed for swaglog
+  os.environ['GIT_BRANCH'] = build_metadata.channel  # Needed for swaglog
+  os.environ['GIT_COMMIT'] = build_metadata.openpilot.git_commit  # Needed for swaglog
 
   if not build_metadata.openpilot.is_dirty:
     os.environ['CLEAN'] = '1'
 
   # init logging
   sentry.init(sentry.SentryProject.SELFDRIVE)
-  cloudlog.bind_global(dongle_id=dongle_id,
-                       version=build_metadata.openpilot.version,
-                       origin=build_metadata.openpilot.git_normalized_origin,
-                       branch=build_metadata.channel,
-                       commit=build_metadata.openpilot.git_commit,
-                       dirty=build_metadata.openpilot.is_dirty,
-                       device=HARDWARE.get_device_type())
+  cloudlog.bind_global(
+    dongle_id=dongle_id,
+    version=build_metadata.openpilot.version,
+    origin=build_metadata.openpilot.git_normalized_origin,
+    branch=build_metadata.channel,
+    commit=build_metadata.openpilot.git_commit,
+    dirty=build_metadata.openpilot.is_dirty,
+    device=HARDWARE.get_device_type(),
+  )
 
   # preimport all processes
   for p in managed_processes.values():
@@ -335,9 +342,8 @@ def manager_thread() -> None:
 
     ensure_running(managed_processes.values(), started, params=params, CP=sm['carParams'], not_run=ignore)
 
-    running = ' '.join("{}{}\u001b[0m".format("\u001b[32m" if p.proc.is_alive() else "\u001b[31m", p.name)
-                       for p in managed_processes.values() if p.proc)
-    print_timer = (print_timer + 1)%10
+    running = ' '.join("{}{}\u001b[0m".format("\u001b[32m" if p.proc.is_alive() else "\u001b[31m", p.name) for p in managed_processes.values() if p.proc)
+    print_timer = (print_timer + 1) % 10
     if print_timer == 0:
       print(running)
     cloudlog.debug(running)
@@ -358,13 +364,15 @@ def manager_thread() -> None:
     if shutdown:
       break
 
+
 def main() -> None:
   manager_init()
-  print(f"python ../../opendbc/car/hyundai/values.py > {Params().get_param_path()}/SupportedCars")
-  os.system(f"python ../../opendbc/car/hyundai/values.py > {Params().get_param_path()}/SupportedCars")
-  os.system(f"python ../../opendbc/car/gm/values.py > {Params().get_param_path()}/SupportedCars_gm")
-  os.system(f"python ../../opendbc/car/toyota/values.py > {Params().get_param_path()}/SupportedCars_toyota")
-  os.system(f"python ../../opendbc/car/mazda/values.py > {Params().get_param_path()}/SupportedCars_mazda")
+  print(f"python opendbc/car/hyundai/values.py > {Params().get_param_path()}/SupportedCars")
+  os.system(f"python opendbc/car/hyundai/values.py > {Params().get_param_path()}/SupportedCars")
+  os.system(f"python opendbc/car/gm/values.py > {Params().get_param_path()}/SupportedCars_gm")
+  os.system(f"python opendbc/car/toyota/values.py > {Params().get_param_path()}/SupportedCars_toyota")
+  os.system(f"python opendbc/car/mazda/values.py > {Params().get_param_path()}/SupportedCars_mazda")
+  os.system(f"python opendbc/car/byd/values.py > {Params().get_param_path()}/SupportedCars_byd")
 
   if os.getenv("PREPAREONLY") is not None:
     return

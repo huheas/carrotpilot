@@ -2674,6 +2674,8 @@ struct Event {
     # DO change the name of the field
     # DON'T change anything after the "@"
     customReservedRawData0 @124 :Data;
+    customReservedRawData1 @148 :Data;
+    customReservedRawData2 @149 :Data;
     navRouteNavd @125 :NavRoute;
     navInstructionCarrot @126 :NavInstruction;
 

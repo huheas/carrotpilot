@@ -40,3 +40,13 @@ if arch != "Darwin":
                                          LIBS=['pthread', shared_lib])
 
   calib_env.Install('$BUILD_ROOT/system/sensord_wt', wt_calibration_tool)
+
+  # 测试工具: 加速度计轴映射验证
+  test_env = env.Clone()
+  test_env.Append(CPPPATH=['sensors'])
+
+  test_accel_axis = test_env.Program('test_accel_axis',
+                                     ['tests/test_accel_axis.cc'],
+                                     LIBS=libs + [shared_lib])
+
+  test_env.Install('$BUILD_ROOT/system/sensord_wt/tests', test_accel_axis)

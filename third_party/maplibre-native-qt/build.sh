@@ -3,7 +3,7 @@ set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 
-ARCHNAME="x86_64"
+ARCHNAME=$(uname -m)
 MAPLIBRE_FLAGS="-DMLN_QT_WITH_LOCATION=OFF"
 if [ -f /AGNOS ]; then
   ARCHNAME="larch64"
@@ -12,7 +12,7 @@ fi
 
 cd $DIR
 if [ ! -d maplibre ]; then
-  git clone git@github.com:maplibre/maplibre-native-qt.git $DIR/maplibre
+  git clone https://github.com/maplibre/maplibre-native-qt $DIR/maplibre
 fi
 
 cd maplibre
