@@ -63,13 +63,13 @@ class LSM6DS3_Gyro(Sensor):
     y = self.parse_16bit(b[2], b[3])
     z = self.parse_16bit(b[4], b[5])
     scale = (8.75 / 1000.0) * (math.pi / 180.0)
-    # 传感器水平放置，与加速度计相同坐标映射: [z, x, -y]
+    # 传感器水平放置，与加速度计相同坐标映射: [x, y, z]
     # 驾驶日志验证确认: sensor_X+=右, sensor_Y+=前, sensor_Z+=上
-    # locationd: meas = [-v[2], -v[1], -v[0]] = [y, -x, -z]
-    #   meas_gyro[0] = roll  = gy  (绕前进轴)
-    #   meas_gyro[1] = pitch = -gx (绕右轴取反=绕左轴)
-    #   meas_gyro[2] = yaw   = -gz (左转为正: Z+朝上右手定则gz>0=左转, 取反后仍正确)
-    xyz = [z * scale, x * scale, -y * scale]
+    # locationd: meas = [-v[2], -v[1], -v[0]]
+    #   meas_gyro[0] = roll  = sensor_X (绕前进轴)
+    #   meas_gyro[1] = pitch = sensor_Y (绕右轴)
+    #   meas_gyro[2] = yaw   = sensor_Z (绕垂直轴)
+    xyz = [x * scale, y * scale, z * scale]
 
     event = log.SensorEventData.new_message()
     event.timestamp = ts

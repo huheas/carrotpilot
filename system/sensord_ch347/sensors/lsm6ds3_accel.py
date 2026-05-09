@@ -87,11 +87,14 @@ class LSM6DS3_Accel(Sensor):
     # locationd.py L109: meas = [-v[2], -v[1], -v[0]]
     # openpilot meas 期望: [前, 左, 上(静止=-9.81)]
     #
-    # 推导: v=[z, x, -y]
-    #   meas[0] = -v[2] = -(-y) = y = 前 ✓
-    #   meas[1] = -v[1] = -(x)  = -x = 左 ✓
-    #   meas[2] = -v[0] = -z         = -9.81 ✓
-    a.v = [z, x, -y]
+    # 实测静止数据: sensor_X=9.84, sensor_Y=0.84, sensor_Z=-0.42
+    # 重力向量 [9.84, 0.84, -0.42] 主要在 X 方向
+    #
+    # 推导: v=[x, y, z]
+    #   meas[0] = -v[2] = -z = 0.42 (接近0)
+    #   meas[1] = -v[1] = -y = -0.84 (接近0)
+    #   meas[2] = -v[0] = -x = -9.84 (接近-9.81) ✓
+    a.v = [x, y, z]
     a.status = 1
     return event
 
