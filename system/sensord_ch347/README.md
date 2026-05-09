@@ -145,12 +145,15 @@ sensord_ch347.py (主进程)
 ### 一键安装
 
 ```bash
-sudo bash system/sensord_ch347/ch347_setup.sh
+sudo bash system/sensord_ch347/setup_ch347.sh
 ```
 
 ### 手动安装
 
 ```bash
+# 下载驱动源码
+git clone https://github.com/aystarik/ch347_vcp.git /data/soft/ch347_vcp
+
 # 编译驱动
 cd /data/soft/ch347_vcp && make
 
@@ -191,7 +194,7 @@ dmesg | grep -i ch347
 ```bash
 sudo chmod 666 /dev/i2c-*
 # 或运行安装脚本配置 udev 规则
-sudo bash system/sensord_ch347/ch347_setup.sh
+sudo bash system/sensord_ch347/setup_ch347.sh
 ```
 
 ### 传感器未响应
@@ -223,7 +226,7 @@ sudo i2cget -y N 0x6b 0x0f
 |------|------|
 | `test_axis_direction.py` | 交互式轴方向测试工具 |
 | `check_orientation.py` | 安装方向快速检查 |
-| `ch347_setup.sh` | 驱动一键安装脚本 |
+| `setup_ch347.sh` | 驱动一键安装脚本 |
 
 ---
 

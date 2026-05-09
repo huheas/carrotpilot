@@ -9,16 +9,26 @@ echo "CH347 驱动和传感器配置脚本"
 echo "========================================="
 echo ""
 
-# 1. 安装驱动到系统
-echo "1. 安装 CH347 驱动到系统..."
+# 1. 获取并编译驱动源码
+echo "1. 获取 CH347 驱动源码..."
+if [ ! -d "/data/soft/ch347_vcp" ]; then
+    git clone https://github.com/aystarik/ch347_vcp.git /data/soft/ch347_vcp
+    echo "   ✓ 源码克隆完成"
+fi
 cd /data/soft/ch347_vcp
+make
+echo "   ✓ 驱动编译完成"
+echo ""
+
+# 2. 安装驱动到系统
+echo "2. 安装 CH347 驱动到系统..."
 sudo cp *.ko /lib/modules/$(uname -r)/updates/
 sudo depmod -a
 echo "   ✓ 驱动安装完成"
 echo ""
 
-# 2. 配置开机自动加载
-echo "2. 配置开机自动加载驱动..."
+# 3. 配置开机自动加载
+echo "3. 配置开机自动加载驱动..."
 sudo tee /etc/modules-load.d/ch347.conf > /dev/null << 'EOF'
 # CH347 USB-to-I2C adapter (aystarik/ch347_vcp)
 mfd-ch347
@@ -27,8 +37,8 @@ EOF
 echo "   ✓ 开机自动加载配置完成"
 echo ""
 
-# 3. 配置 udev 规则（设置 I2C 设备权限）
-echo "3. 配置 I2C 设备权限..."
+# 4. 配置 udev 规则（设置 I2C 设备权限）
+echo "4. 配置 I2C 设备权限..."
 sudo tee /etc/udev/rules.d/99-ch347-i2c.rules > /dev/null << 'EOF'
 # CH347 I2C bus permissions
 SUBSYSTEM=="i2c-dev", KERNEL=="i2c-10", MODE="0666", GROUP="plugdev"
@@ -36,15 +46,15 @@ EOF
 echo "   ✓ I2C 权限配置完成"
 echo ""
 
-# 4. 重新加载 udev 规则
-echo "4. 重新加载 udev 规则..."
+# 5. 重新加载 udev 规则
+echo "5. 重新加载 udev 规则..."
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 echo "   ✓ udev 规则已重载"
 echo ""
 
-# 5. 测试驱动
-echo "5. 测试驱动..."
+# 6. 测试驱动
+echo "6. 测试驱动..."
 # 卸载现有驱动
 sudo rmmod spi-ch347 2>/dev/null || true
 sudo rmmod gpio-ch347 2>/dev/null || true
@@ -67,8 +77,8 @@ else
 fi
 echo ""
 
-# 6. 检查 I2C 设备
-echo "6. 检查 I2C 设备..."
+# 7. 检查 I2C 设备
+echo "7. 检查 I2C 设备..."
 if [ -e "/dev/i2c-10" ]; then
     echo "   ✓ /dev/i2c-10 已创建"
     ls -la /dev/i2c-10
@@ -78,8 +88,8 @@ else
 fi
 echo ""
 
-# 7. 测试传感器
-echo "7. 测试 LSM6DS3 传感器..."
+# 8. 测试传感器
+echo "8. 测试 LSM6DS3 传感器..."
 cd /data/carrot2-v9-acc
 source .venv/bin/activate
 
