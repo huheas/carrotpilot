@@ -24,16 +24,48 @@ class Sensor:
       self.bus.close()
 
   def reconnect(self) -> bool:
+    """
+    重新建立 I2C 连接。
+    关闭旧的 bus 句柄,等待设备重新可用,然后创建新连接。
+    返回是否成功。
+    """
+    import os
+    
     try:
+      # 1. 关闭旧连接
       if hasattr(self, 'bus'):
         try:
           self.bus.close()
         except Exception:
           pass
-      time.sleep(0.1)
+      
+      # 2. 等待设备重新枚举
+      time.sleep(0.2)
+      
+      # 3. 检查设备节点是否存在
+      dev_path = f"/dev/i2c-{self.bus_num}"
+      if not os.path.exists(dev_path):
+        # 设备节点不存在,可能需要重新绑定驱动
+        return False
+      
+      # 4. 尝试创建新连接
       self.bus = smbus2.SMBus(self.bus_num)
-      return True
-    except Exception:
+      
+      # 5. 验证设备是否响应 (读取 WHO_AM_I)
+      try:
+        chip_id = self.read(0x0F, 1)[0]
+        if chip_id in [0x69, 0x6A]:  # LSM6DSM or LSM6DS3TRC
+          return True
+        return False
+      except Exception:
+        # 设备不响应,关闭连接
+        try:
+          self.bus.close()
+        except Exception:
+          pass
+        return False
+        
+    except Exception as e:
       return False
 
   def read(self, addr: int, length: int) -> bytes:

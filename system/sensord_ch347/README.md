@@ -129,12 +129,22 @@ sensord_ch347.py (主进程)
   │
   ├── Thread: poll_accelerometer      # 104Hz 轮询加速度计
   │     └── LSM6DS3_Accel.get_event() → PubMaster("accelerometer")
+  │     └── 自动重连机制 (设备丢失时指数退避重试)
   │
   └── Thread: poll_gyroscope          # 104Hz 轮询陀螺仪
         └── LSM6DS3_Gyro.get_event()  → PubMaster("gyroscope")
+        └── 自动重连机制 (设备丢失时指数退避重试)
 ```
 
 所有传感器使用轮询模式（CH347 不暴露 INT1 GPIO 中断线）。
+
+### 自动重连机制
+
+当检测到 I2C 设备丢失（`OSError: [Errno 19] No such device`）时：
+
+1. **指数退避重试**: 0.5s → 1s → 2s → 4s → 5s (最大)
+2. **重新初始化传感器**: 重连后调用 `sensor.init()` 恢复配置
+3. **自动恢复**: 无需重启进程，设备恢复后自动继续工作
 
 ---
 

@@ -320,6 +320,9 @@ def polling_loop(sensor: Sensor, service: str, event: threading.Event) -> None:
 
   cloudlog.info(f"[sensord_ch347] Starting polling loop: {service} @ {SERVICE_LIST[service].frequency}Hz")
 
+  reconnect_attempts = 0
+  max_reconnect_delay = 5.0  # 最大重连间隔(秒)
+
   while not event.is_set():
     try:
       evt = sensor.get_event()
@@ -329,8 +332,32 @@ def polling_loop(sensor: Sensor, service: str, event: threading.Event) -> None:
       msg = messaging.new_message(service, valid=True)
       setattr(msg, service, evt)
       pm.send(service, msg)
+      
+      # 成功读取后重置重连计数器
+      reconnect_attempts = 0
     except Sensor.DataNotReady:
       pass  # data not ready yet, will retry next cycle
+    except OSError as e:
+      # I2C 设备丢失 (Errno 19: No such device)
+      cloudlog.warning(f"[sensord_ch347] I2C device lost for {service}: {e}")
+      reconnect_attempts += 1
+      
+      # 指数退避重连
+      delay = min(0.5 * (2 ** (reconnect_attempts - 1)), max_reconnect_delay)
+      cloudlog.info(f"[sensord_ch347] Attempting reconnect in {delay:.1f}s (attempt {reconnect_attempts})")
+      time.sleep(delay)
+      
+      if sensor.reconnect():
+        cloudlog.info(f"[sensord_ch347] Reconnected {service} successfully")
+        # 重连后需要重新初始化传感器
+        try:
+          sensor.init()
+          cloudlog.info(f"[sensord_ch347] Reinitialized {service}")
+          reconnect_attempts = 0
+        except Exception:
+          cloudlog.exception(f"[sensord_ch347] Failed to reinitialize {service}")
+      else:
+        cloudlog.error(f"[sensord_ch347] Reconnect failed for {service}")
     except Exception:
       cloudlog.exception(f"[sensord_ch347] Error in {service} polling loop")
     rk.keep_time()
