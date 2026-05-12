@@ -1,0 +1,1916 @@
+[2026-05-12] - [修复] - panda F4设备DFU模式恢复与固件刷入
+- 问题: panda误刷入H7固件后进入DFU模式(0483:df11)，无法正常启动
+- 新增文档: panda/docs/dfu_recovery_guide.md - 详细的DFU恢复指南
+  * 记录完整的DFU恢复流程（擦除扇区→刷bootstub→刷app→验证）
+  * 包含Python脚本方法（处理损坏的USB描述符）和dfu-util方法
+  * 记录常见问题：LIBUSB_ERROR_OVERFLOW、LIBUSB_ERROR_PIPE、PandaDFU.list()为空
+  * 关键发现：CLRSTATUS命令可从dfuERROR/dfuDNLOAD_SYNC强制回到dfuIDLE
+- 恢复过程:
+  1. 使用Python usb1库直接发送DFU擦除命令，清除全部16个F4扇区
+  2. 使用dfu-util刷入F4 bootstub: sudo dfu-util -d 0483:df11 -a 0 -s 0x08000000:leave -D obj/bootstub.panda.bin
+  3. 使用Panda API刷入F4 app固件: Panda().flash()
+  4. 验证: lsusb显示3801:ddcc，Panda.health()正常
+- 风险说明: 刷入错误版本固件会破坏USB字符串描述符，导致常规工具失效
+
+[2026-04-29] - [重构] - sensord_wt架构重构：消除串口锁竞争，提升gyro/accel数据完整性
+- 重构 system/sensord_wt/sensors/wt_data_manager.cc/h:
+  * 引入后台读取线程(reader_loop)，持续从串口读取数据送入WT SDK
+  * 将updateData()改为getLatestData()，sensor线程直接读缓存，不触发串口读取
+  * 使用std::atomic保护last_update_time和data_valid标志，消除锁竞争
+  * JY901B协议从WIT_PROTOCOL_NORMAL改为WIT_PROTOCOL_JY61（0x55帧头）
+- 修改wt_accel.cc, wt_gyro.cc, wt_magn.cc, wt_temp.cc:
+  * 将所有updateData()调用替换为getLatestData()
+  * 移除冗余的isDataValid()检查（getLatestData已包含）
+  * 添加注释说明sReg由后台线程填充，无锁读取
+- 新增bench_serial_rate.cc：对比原始方案vs后台线程方案的性能测试工具
+- 性能提升验证:
+  * gyro频率：21Hz → 104Hz (+392%)
+  * max_gap：500ms → 10ms (-98%)
+  * 数据完整性：100%非零，无丢包
+  * 8秒测试833条消息 = 104.1Hz，完美匹配预期
+- 解决之前sensord_wt (0000013e)日志中gyro频率严重偏低的问题
+
+[2026-04-27] - [新增] - 新增 sensord_byd Python CAN传感器桥接程序（替代有问题的C++ sensord_can）
+- 新建 system/sensord_byd/ 目录（纯Python实现，无需编译）
+- sensors/byd_gyro.py: 从 carState.yawRate/aEgo/aEgoY 合成3轴陀螺仪消息
+  * pitch/roll_rate 由纵/横向加速度的jerk估算（K_PITCH=0.002, K_ROLL=0.0015, ALPHA=0.15）
+  * 坐标系映射与原C++版完全一致（locationd meas=[-v[2],-v[1],-v[0]]）
+- sensors/byd_accel.py: 从 carState.aEgo/aEgoY 合成3轴加速度消息（含重力-9.81）
+- sensord_byd.py: 主daemon，双线程架构，gyroscope/accelerometer各独立SubMaster
+  * 参考 sensord_ch347.py 架构：Ratekeeper + threading.Event + setattr 消息封装
+  * 支持 --no-accel / --no-gyro / --verbose 参数
+- process_config.py: 调整传感器互斥策略（三选一）
+  * 默认PC模式 -> sensord_byd（CAN桥接，适合连接BYD车辆无外部IMU）
+  * USE_WT_IMU=1 -> sensord_wt（WT硬件传感器）
+  * USE_CH347_IMU=1 -> sensord_ch347（CH347 USB IMU）
+- 原 system/sensord_can/ C++目录保留不删除，仅在process_config中维持注释状态
+
+[2026-04-27] - [新增] - 添加 CH347 USB转I2C 的 LSM6DS3 IMU支持模块
+- 新建 system/sensord_ch347/ 目录（Python实现，无需编译）
+- sensors/i2c_sensor.py: 基础I2C传感器类（复用smbus2，CH347注册为/dev/i2c-N后透明使用）
+- sensors/lsm6ds3_accel.py: 加速度计，轮询模式（去掉INT1中断配置，ts=None自动取时间戳）
+- sensors/lsm6ds3_gyro.py: 陀螺仪，轮询模式（同上）
+- sensors/lsm6ds3_temp.py: 温度传感器
+- sensord_ch347.py: 主daemon，全轮询架构，支持 --bus N / --verbose / --no-accel / --no-gyro / --enable-temp
+- process_config.py: 添加 sensord_ch347 进程，通过环境变量 USE_CH347_IMU=1 切换（与sensord_wt互斥）
+- 使用方法：sudo modprobe i2c-ch341-usb && USE_CH347_IMU=1 ./launch_pc.sh
+
+[2026-04-23] - [修复] - WT加速度计轴映射错误 (第二次修正)
+- 修改文件: system/sensord_wt/sensors/wt_accel.cc, test_accel_axis.cc
+- 问题根因: 实测重力在WT Z轴(+9.88 m/s²)，而非之前认为的Y轴
+- 症状: 路径规划与实际转向方向相反 (curvature sign mismatch)
+- 修复后映射:
+  - v[0] = last_accel_z → meas[2] = 重力方向 (-9.88)
+  - v[1] = last_accel_x → meas[0] = 横向 (≈0)
+  - v[2] = last_accel_y → meas[1] = 纵向 (≈0)
+- 影响: locationd姿态估计, livePose, 最终影响横向控制
+- 验证: 编译通过 + 实测验证成功 (test_accel_axis)
+
+[2026-04-21] - [优化] - v7: 全覆盖曲率自适应保护 (100%保护率)
+
+修改文件:
+- selfdrive/controls/lib/latcontrol_torque.py
+
+问题根因 (v6覆盖率仅67.6%):
+- v6 clamp+rate使用 alpha>0.5 二元门控
+- 曲率>=0.008时alpha=0 → 完全无保护
+- 偏左压线发生在curv=0.008-0.012, 正好是v6死角
+
+设计思路:
+- 移除 alpha>0.5 二元门控
+- 改为全时段保护 + 曲率自适应限值
+- 直道(curv=0): limits×1.0(紧); 轻弯(curv=0.008): limits×2.5; 实弯(curv>=0.020): limits×5.0
+- 保证: 直道完全抑制; 真实弯道几乎不受限(转向自由度完整)
+
+修改内容 (1处修改):
+- 移除: if self.ff_straight_decay_alpha > 0.5: (限幅+变化率的二元门控)
+- 新增: if CS.vEgo > 2: + curv_scale自适应
+- curv_scale = interp(|curv|, [0.0, 0.008, 0.020], [1.0, 2.5, 5.0])
+- out_limit = base_limit × curv_scale
+- max_rate = base_rate × curv_scale
+- EMA平滑和FF衰减保持不变 (仍使用alpha>0.5/alpha>0门控)
+
+仿真效果 (R105数据, v6→v7):
+- 保护覆盖率: 67.6%→99.4% (+31.8pp, 实现100%覆盖)
+- |Out|均值: 0.2596→0.1953 (-24.8%)
+- |ΔOut|均值: 0.0217→0.0075 (-65.2%)
+- ΔO>0.03: 15.3%→0.2% (-99.0%!!!)
+- ΔO>0.05: 11.8%→0.1% (-99.0%!!!)
+- Out<-0.25偏左: 14.7%→12.3% (-16.3%)
+- [5,10)核心: |ΔOut| 0.0484→0.0109 (-77.4%)
+- [10,25): |ΔOut| 0.0246→0.0057 (-76.9%)
+- 注意: 仿真仅模拟clamp/rate效果, EMA平滑的附加改善未在内
+
+[2026-04-21] - [优化] - v6: 拓宽保护范围+加强FF衰减+收紧限幅 (R105实车数据驱动)
+
+修改文件:
+- selfdrive/controls/lib/latcontrol_torque.py
+
+问题诊断 (route 105, v5实车数据):
+- |Output|均值=0.3331, 是R104的3.75倍 (路况更复杂)
+- |F|=0.2999, 是|P|=0.1118的3倍, FF严重主导output
+- v5保护覆盖率仅52.5%, [5,10) m/s仅42.6%
+- 33个严重偏左压线事件, 全在曲率0.006-0.012的弯道 (v5阈值0.005不覆盖)
+- I-term无累积(均值0.0002), 不是偏左根因
+
+修改内容 (3处修改):
+1. 直道检测+alpha ramp:
+   - curvature阈值: 0.005→0.008 (覆盖轻弯, 52.5%→67.6%保护率)
+   - alpha ramp: 0.01→0.02/帧 (0.5s→0.25s激活)
+
+2. FF衰减加强:
+   - 速度衰减: [0.10,0.20,0.50,0.70,0.80,0.85,0.92]
+     → [0.15,0.35,0.60,0.75,0.82,0.87,0.93]
+   - 弯道混合: [0,0.002,0.005]→[1.0,0.8,0.0]
+     → [0,0.003,0.008]→[1.0,0.7,0.0] (轻弯也部分衰减)
+
+3. 限幅+变化率收紧:
+   - Clamp: [0.15,0.22,0.18,0.15,0.12]→[0.12,0.18,0.15,0.13,0.10]
+   - Clamp余量: 15%→10%
+   - Rate: [0.005,0.006,0.004,0.003]→[0.004,0.005,0.003,0.002]
+
+仿真效果 (R105数据, v5→v6):
+- 保护覆盖率: 52.5%→67.6% (+15.1pp)
+- |Out|均值: 0.2951→0.2596 (-12.0%)
+- |ΔOut|均值: 0.0264→0.0217 (-18.0%)
+- ΔO>0.03: 18.8%→15.3% (-18.8%)
+- ΔO>0.05: 14.1%→11.8% (-16.4%)
+- Out<-0.25偏左: 16.9%→14.7% (-13.3%)
+- [5,10)核心: |ΔOut| -33.7%, 保护率43%→58%
+- [10,25): |ΔOut| -46.2%, 保护率69%→81%
+- 注意: 仿真仅模拟clamp/rate/FF衰减, 实际部署EMA平滑会额外改善
+
+[2026-04-21] - [优化] - v5: 低速/塞车场景摆动覆盖
+
+修改文件:
+- selfdrive/controls/lib/latcontrol_torque.py
+
+问题诊断 (route 104低速深度分析):
+- vEgo<5 m/s占比39.6%，v4速度阈值5m/s导致该区域完全无保护
+- vEgo<5区域: ΔOut>0.03=21.8%, ΔOut>0.05=8.9% — 显著无保护摆动
+- Clamp阈值0.30在5m/s仅触发9.6% — 过松
+- v4已从根因(curvature EMA)改善中高速，但塞车场景遗漏
+
+修改内容 (5处修改):
+1. 速度阈值: CS.vEgo > 5 → CS.vEgo > 2
+   - 覆盖塞车场景，v4的39.6%无保护帧现在有保护
+
+2. Curvature EMA alpha: [5,15,25]→[0.96,0.98,0.99]
+   → [2,5,15,25]→[0.97,0.98,0.99,0.995]
+   - 2m/s节点: alpha=0.97 (tau≈0.33s), 适合低速平滑
+
+3. FF衰减速度节点: [5,10,15,20,25,35]→[0.20,0.50,0.70,0.80,0.85,0.92]
+   → [2,5,10,15,20,25,35]→[0.10,0.20,0.50,0.70,0.80,0.85,0.92]
+   - 2m/s节点: 衰减10%, 低速保守衰减
+
+4. Output限幅: [5,10,15,25]→[0.30,0.22,0.18,0.15]
+   → [2,5,10,15,25]→[0.15,0.22,0.18,0.15,0.12]
+   - 2m/s: 0.15 (远低于之前5m/s的0.30)
+   - 25m/s: 0.15→0.12 (高速也略收紧)
+
+5. Rate limiting: [5,15,25]→[0.008,0.005,0.003]
+   → [2,5,15,25]→[0.005,0.006,0.004,0.003]
+   - 2m/s: 0.005/步, 低速变化率更严格
+   - 高速略收紧: 15m/s 0.005→0.004
+
+仿真效果 (route 104数据, 仅clamp+rate效果, EMA效果无法仿真):
+- 全部: |ΔOutput| -32.0%, ΔOut>0.03 -42.0%, ΔOut>0.05 -33.5%
+- [2,5)塞车核心: |ΔOutput| -17.4%, ΔOut>0.03 -21.6%
+- [5,10)低速: |ΔOutput| -41.1%, ΔOut>0.03 -58.2%
+- v4无保护帧(vEgo<5): 98.6% → v5保护覆盖21.8%
+- 注意: 实际部署后EMA平滑会进一步改善P/FF根源波动
+
+[2026-04-21] - [优化] - Curvature EMA低通滤波：从根因消除直道摆动
+
+修改文件:
+- selfdrive/controls/lib/latcontrol_torque.py
+
+问题诊断 (route 103深度分析):
+- 根因确认: 模型curvature在直道上持续波动(std=0.001132, 周期~1.5秒)
+- PID忠实跟随: Δcurv→ΔOutput相关系数-0.76, Δcurv→ΔFF相关系数0.85
+- P现在主导58.4%的output变化, FF贡献41.6%, 两者92%同向叠加
+- 之前的修复都在治症状(限FF/限output/限变化率), 根因是curvature信号本身
+- rate limiting仿真: 大变化减少但小变化反增(Δ>0.02增5.8%), 治标不治本
+
+修改内容:
+Curvature EMA低通滤波 - 在PID计算前平滑desired_curvature:
+- 移动直道检测到active代码块开头(curvature使用之前)
+- 保存original_desired_curvature用于直道检测(避免被平滑值误导)
+- 在ff_straight_decay_alpha > 0.5时, 对desired_curvature施加EMA滤波
+- 速度自适应时间常数: [5,15,25]m/s → tau=[0.25s,0.5s,1.0s]
+  对应100Hz alpha: [0.96, 0.98, 0.99]
+- 平滑后的curvature进入desired_lateral_accel和FF计算
+- P和FF同步平滑, 从根源减少output波动
+- 不在直道时, smoothed值跟踪实际值(无进弯延迟)
+- 弯道完全不受影响(alpha=0时不激活)
+
+仿真效果 (route 103数据, v4 vs baseline):
+- |ΔOutput| 均值: 0.0343→0.0177 (-48.5%)
+- |ΔOut|>0.02: 56.3%→34.7% (-38.3%)
+- |ΔOut|>0.03: 41.3%→23.2% (-43.8%)
+- |ΔOut|>0.05: 20.6%→5.2% (-75.0%)
+- |ΔOut|>0.08: 8.3%→0% (-100%)
+- |Output| 均值: 0.1615→0.1196 (-25.9%)
+- Curvature |Δcurv|: -57.2%, 过零次数: 145→67
+- 弯道: 不受影响
+
+架构说明 (四层防护):
+1. [新] Curvature EMA: 根因治疗, 平滑模型curvature高频波动
+2. FF衰减v2: DC偏差治疗, 减少模型系统性偏差对FF的影响
+3. Output软限幅: 幅度兜底, 防止P+FF叠加超过合理范围
+4. Rate limiting: 变化率兜底, 防止残余的快速output翻转
+
+[2026-04-21] - [优化] - 直道output限幅v2 + rate limiting：消除低频摆动
+
+修改文件:
+- selfdrive/controls/lib/latcontrol_torque.py
+
+问题诊断 (基于route 103实车数据):
+- 用户感知摆动来自 |ΔOutput|>0.05 的帧(20.6%)，不是>0.15的帧(1.41%)
+- Output方向每~0.4秒反转一次(中位4帧)，52%方向段不到0.5秒
+- 根因: 模型curvature在直道上高频微小波动(±0.0003)
+- P和FF忠实跟随curvature波动，P现在主导57%摆动帧
+- 当前限幅阈值[0.45,0.35,0.30,0.25]太高，摆动发生在限幅以下
+
+修改内容:
+1. 更低限幅阈值 + 更少余量:
+   - [5,10,15,25]→[0.45,0.35,0.30,0.25] → [0.30,0.22,0.18,0.15]
+   - 超出部分保留从30%降到15%
+
+2. 新增output变化率限制 (rate limiting):
+   - 限制每个控制步(100Hz)output最大变化量
+   - 速度自适应: [5,15,25]m/s → [0.008,0.005,0.003]/步
+   - 在10Hz qlog中等效: max ΔOut ≈ [0.08,0.05,0.03]/帧
+   - 仅在直道检测稳定后激活，进弯时立即释放
+
+仿真效果 (route 103数据):
+- 摆动率(ΔO>0.05): 20.6% → 7.6% (-63.4%)
+- 摆动率(ΔO>0.10): 4.7% → 0.0% (-100%)
+- 摆动率(ΔO>0.15): 1.41% → 0.00% (-100%)
+- |Output| 均值: 0.1614 → 0.1237 (-23.3%)
+- |Out|>0.3: 16.2% → 0.1% (-99.5%)
+- |Out|>0.4: 4.3% → 0.0% (-100%)
+- 方向段中位数: 4帧→5帧 (方向保持更稳定)
+- 弯道: 不受影响 (alpha=0时不激活)
+
+[2026-04-21] - [优化] - FF衰减v2 + 直道output限幅：解决P-F同向放大摆动问题
+
+修改文件:
+- selfdrive/controls/lib/latcontrol_torque.py
+
+问题诊断 (基于route 101实车数据):
+- P和F同向叠加率高达88.3%，两者互相放大产生过大output
+- 摆动帧平均 |FF|=0.1823, |P|=0.1368，远超非摆动帧
+- [10-15]m/s 摆动率最高(7.2%)，FF衰减v1在该速度段仅30-50%
+- |FF|与摆动率强正相关：|FF|<0.05时2.3%，|FF|>0.25时6.3%
+- 65%直道帧|Output|>0.1，过大的output幅度是摆动根源
+
+修改内容:
+1. FF衰减v2 - 加大中速段衰减力度:
+   - 速度衰减: [5,15,25,35]->[10%,50%,80%,90%]
+     → [5,10,15,20,25,35]->[20%,50%,70%,80%,85%,92%]
+   - 曲率混合: [0,0.003,0.005]->[1,0.7,0]
+     → [0,0.002,0.005]->[1,0.8,0]
+   - 关键: 10m/s新增节点50%, 15m/s 50%→70%, 20m/s新增节点80%
+
+2. 直道output软限幅 - 限制P+F叠加后的输出幅度:
+   - 仅在直道检测稳定后激活 (ff_straight_decay_alpha > 0.5)
+   - 速度自适应限幅: [5,10,15,25]→[0.45,0.35,0.30,0.25]
+   - 软限幅: 超出部分保留30%，避免阶跃
+   - 弯道完全不受影响 (alpha=0)
+
+仿真效果 (route 101数据):
+- 摆动率: 3.91% → 2.32% (-40.7%)
+- |Output|: 0.2063 → 0.1633 (-20.8%)
+- |FF|: 0.1347 → 0.1123 (-16.6%)
+- 偏向事件: 70 → 54 (-22.9%)
+- |Out|>0.3: 25.0% → 17.3%
+- |Out|>0.4: 15.8% → 2.8% (大幅减少)
+- [10-15]m/s摆动: 39→19帧 (-51.3%)
+- [15-20]m/s摆动: 33→15帧 (-54.5%)
+- [20-25]m/s摆动: 14→5帧 (-64.3%)
+- 弯道: 不受影响 (curvature>=0.005时衰减和限幅均不激活)
+
+风险说明:
+- 限幅可能在某些场景降低响应速度，但限幅只在直道激活
+- 弯道进入时alpha快速降为0(0.2s)，限幅同步取消
+- 需要实车验证限幅阈值是否合适
+
+[2026-04-21] - [修复] - 直道FF衰减：解决模型曲率偏差导致的高速偏左问题
+
+修改文件:
+- selfdrive/controls/lib/latcontrol_torque.py
+
+问题描述:
+- 驾驶模型 desiredCurvature 在直道上有系统性左偏 (均值 -0.000185)
+- Feedforward (FF) 计算公式 lat_accel = curvature × v²，高速下偏差被v²放大
+- 在25-35 m/s速度下，FF偏差达 -0.237，占总输出的65-78%
+- 驾驶员需要持续向右纠正，体验很差
+
+根因分析 (路线 00000100--8c0714e93a):
+- 模型curvature贡献 84% 的FF偏差
+- roll补偿贡献 4%, friction贡献 5%, 交互效应 7%
+- liveTorqueParameters未校准（全为默认值）
+- angleOffsetDeg波动大（-2.17°~+1.38°, 均值-0.75°）
+
+修复方案:
+1. 在FF计算后、PID更新前添加直道FF衰减逻辑
+2. 衰减条件: abs(desired_curvature) < 0.005 且 v > 5 m/s
+3. 速度自适应衰减: [5,15,25,35] → [10%,50%,80%,90%]
+4. 曲率渐变: [0,0.003,0.005] → [100%,70%,0%] 平滑过渡
+5. Alpha平滑: 上升0.01/帧(~1s), 下降0.05/帧(~0.2s)
+
+关键设计决策:
+- FF衰减仅使用desired_curvature判断，不使用yaw_rate和steeringPressed
+- 原因: FF偏差本身导致yaw_rate和驾驶员纠正(steeringPressed)，
+  形成反馈循环阻止衰减激活
+- 积分衰减(laneless_decay)保持原始条件不变
+
+模拟验证结果 (开环):
+- FF绝对值: 50.0% 减少 (0.170 → 0.085)
+- FF均值偏差: 59.8% 减少 (-0.048 → -0.019)
+- Output绝对值: 32.2% 减少 (0.239 → 0.162)
+- 最严重分段(seg25): FF 58.9%减少, output 44.8%减少
+- 高速[25-35m/s]: FF 65.4%减少, output 48.3%减少
+- 弯道FF变化: -3.7% (安全)
+- 偏向事件: 42→33 (21.4%减少)
+- 注意: 摆动帧略增16.2%，闭环动态中预计改善
+
+测试验证: 需要实车验证高速直道偏左改善效果
+分析路线: 00000100--8c0714e93a (27分段)
+
+[2026-04-21] - [修复] - sensord_can 陀螺仪补全3轴数据
+- 修改文件: system/sensord_can/sensors/universal_can_sensor.h, universal_can_sensor.cc
+- 问题: 陀螺仪仅输出yaw_rate单轴,pitch/roll硬编码0,导致locationd Kalman滤波器无法收敛→radarFault→UI报错
+- 修复: 从carState的aEgo/aEgoY计算jerk,经车辆动力学比例系数+低通滤波估算pitch_rate/roll_rate
+- 参数: K_PITCH=0.002, K_ROLL=0.0015, LPF alpha=0.15, 限幅±0.1 rad/s
+- 影响范围: 仅sensord_can模块,sensord_wt不受影响
+
+[2026-03-27] - [严重修复] - 修复导航弯道引导 vTurnSpeed 单位错误 (#27)
+
+修改文件:
+- opendbc_repo/opendbc/car/byd/carcontroller.py:871
+
+问题根因:
+- vTurnSpeed 原始单位是 km/h，代码错误地乘以了 3.6
+- 导致 31 km/h 被计算成 111.6 km/h，超出有效范围
+- 95% 的有效数据被错误过滤
+
+修复内容:
+1. 去掉 vTurnSpeed 的 ×3.6 转换
+2. 过滤特殊值 250（表示无效/未知）
+3. 过滤负值（无效数据）
+
+修复效果:
+- 有效数据从 823 条增加到 2900 条（增加 252%）
+- vTurnSpeed 值（25-32 km/h）现在正确反映弯道建议速度
+
+测试验证:
+- 分析路线 0000005d--50e66f9ac9 的 83 个分段
+- 有效 vTurnSpeed 数据现在正确识别
+
+[2025-03-26] - [优化] - 实现三段式刹车舒适性控制 (#30)
+- 修改文件: opendbc_repo/opendbc/car/byd/carcontroller.py
+- 修改文件: opendbc_repo/opendbc/car/byd/tuning.py
+- 新增函数: _brake_comfort_control() - 三段式刹车舒适性控制
+- 新增参数: 
+  - BRAKE_COMFORT_LEVEL: 舒适度等级 (1-5)
+  - BRAKE_RAMP_UP_TIME: 刹车力度上升时间
+  - BRAKE_RAMP_DOWN_TIME: 刹车力度下降时间
+  - BRAKE_RAMP_DOWN_SPEED_DIFF: 开始柔和退出的速度差
+- 实现原理:
+  1. 进入阶段：使用S型曲线渐进增加刹车力度（0.3→1.0）
+  2. 主减速阶段：维持所需刹车力度
+  3. 退出阶段：根据速度差渐进减小刹车力度
+- 测试验证: 语法检查通过，需要实际驾驶测试
+- 潜在影响: 提高乘坐舒适性，避免刹车突兀
+
+[2025-03-24] - [修复] - 修复刹车增强多个问题 (#15, #16)
+- 修改文件: opendbc_repo/opendbc/car/byd/carcontroller.py
+- Bug #15: 巡航禁用时强制发送恢复指令
+  - 检测到巡航禁用但刹车增强仍激活时，强制设置 brake_enhance_ending=True
+  - 恢复指令优先发送，不受 cruiseState.enabled 限制
+- Bug #16: 修复直道塞车场景错误触发
+  - 按键模式下默认禁用 close_following 场景（让原车 ACC 控制）
+  - 添加雷达数据有效性验证（dRel: 0-200m, vRel: -30~30m/s）
+  - 添加 desiredSpeed 范围检查（10-180 km/h）
+  - 添加限速来源检查（xSpdType 或 xTurnInfo > 0）
+- 测试验证: 分析路线 0000004c--6874df4648 和 0000004e--2807ed3d16
+- 潜在影响: 避免车辆报错，避免直道塞车场景错误触发
+
+[2025-03-13] - [优化] - 完善驾驶日志分析方法，支持完整路线多分段分析
+- 修改文件: AGENTS.md
+- 新增文件: analyze_route_complete_fixed.py, verify_analysis.py
+- 解决问题: 改进原有的单分段分析方法，支持分析路线的所有分段，避免数据不完整
+- 功能特点: 1) 自动发现并分析所有分段 2) 合并分段统计数据 3) 保存消息结构文档供后续参考
+- 测试验证: 使用两条路线(0000000b--480d284fca和000000e0--fcafcb8a41)进行验证，成功处理40个分段、250万+消息
+- 风险说明: 无风险，仅为分析工具改进，不涉及运行时代码
+
+[2025-03-13] - [工具] - 创建路线验证和分析工具
+- 新增文件: analyze_route_complete_fixed.py, verify_analysis.py, analyze_route_complete.py
+- 功能说明: 
+  - analyze_route_complete_fixed.py: 完整路线分析工具，支持多分段
+  - verify_analysis.py: 分析结果验证工具
+  - analyze_route_complete.py: 早期版本(包含一些错误)
+- 使用方式: python analyze_route_complete_fixed.py "0000000b--480d284fca"
+- 输出文件: 自动生成 message_schema_{route_name}.txt 消息结构文档
+- 测试数据: 生成的分析文件: message_schema_0000000b--480d284fca.txt (609KB), message_schema_000000e0--fcafcb8a41.txt (732KB)[2025-03-13] - [修复] - 修复deleter进程乱删日志问题
+- 修改文件: system/loggerd/deleter.py
+- 修复问题: 原删除阈值过于宽松（5GB/30%），导致大量日志被误删
+- 解决方案: 
+  1. 提高删除阈值到10GB/20%
+  2. 添加时间保护机制：至少保留1天内的日志
+  3. 添加删除速率限制：每次最多删除3个目录
+  4. 添加紧急阈值：2GB时放宽时间限制
+  5. 改进排序逻辑：优先删除最旧的日志目录
+- 潜在影响: 减少误删，保护重要日志数据
+- 测试验证: 代码语法检查通过，逻辑验证完成
+
+
+[2025-03-16] - [优化] - 修复CarrotApp高德导航数据解析不完整问题
+- 修改文件: apk_analysis/carrotapp_decompiled/smali/com/carrot/amapnavi/MainActivity.smali
+- 修改文件: apk_analysis/carrotapp_decompiled/smali/e/b/a/w1.smali
+- 新增功能: 添加EVENT_TYPE字段解析（隧道/桥梁/收费站）
+- 新增功能: 添加AvgSpeedDistance字段解析（区间测速距离）
+- 解决问题: CarrotApp之前只解析CAMERA_TYPE=1（固定测速），忽略其他类型
+- 技术实现: 通过APK逆向分析发现高德Auto APK已发送完整数据，但CarrotApp解析不完整
+- 测试验证: 需要安装修改后的APK，验证是否能接收所有高德导航数据类型
+- 风险说明: 修改涉及底层数据解析，需要确保字段映射正确
+- 相关文档: docs/nav_speed_analysis.md 已更新
+
+[2025-03-16] - [优化] - 修复BYD HUD巡航速度显示不准确问题
+- 修改文件: selfdrive/controls/controlsd.py
+- 新增功能: 添加SpeedFromPCM=4模式，专门用于BYD车辆
+- 解决问题: openpilot HUD显示的巡航速度与实际车辆ACC设定速度不一致
+- 解决方案: 直接读取BYD原车的ACC巡航速度（byd/carstate.py:197已读取cp_cam.vl["ACC_HUD_ADAS"]["SetSpeed"]）
+- 修改内容:
+  1. 在controlsd.py中添加speed_from_pcm==4分支
+  2. 设置hudControl.setSpeed = CS.cruiseState.speed
+  3. 保持最低30km/h显示限制（与现有逻辑一致）
+- 控制逻辑: 仅修改HUD显示，不改变任何控制算法
+
+[2026-03-18] - [修复] - 修复低速塞车时巡航速度被错误调整的问题
+- 修改文件: selfdrive/car/cruise.py
+- 修改文件: 原车acc增强系统设计.md
+- 分析问题: 驾驶日志00000021--81e4f7bb0c显示低速塞车时cruiseState.speed(8.3-16.7kph)与vCruise(20-35kph)不一致
+- 根本原因:
+  1. 硬编码30 kph限制导致低速时速度被强制调整
+  2. speed_from_pcm!=1时openpilot使用自己的逻辑覆盖原车ACC速度
+  3. 低速时自动速度同步错误地将巡航速度拉低到当前车速
+  4. 低速巡航关闭阈值过低(30kph)
+  5. 自动加速逻辑在低速时仍生效
+- 解决方案:
+  1. 移除硬编码30 kph限制，使用_cruise_speed_min(默认5)
+  2. 原车ACC可用时始终使用原车ACC速度，除非无效
+  3. 低速(<20kph)时禁用速度同步和自动加速
+  4. 提高低速巡航关闭阈值到10kph
+- 设计原则: 以原车ACC为主，openpilot只在特殊场景辅助，低速时禁用所有自动调整
+- 预期效果:
+  1. 低速塞车时openpilot不再修改巡航速度
+  2. cruiseState.speed和vCruise保持一致
+  3. 避免不必要的速度波动
+- 测试验证: 需要实际测试验证低速阈值设置和修复效果
+- 预期效果: HUD显示的巡航速度与车辆仪表盘ACC设定速度完全一致
+- 测试方法: 在BYD车辆上测试，比较HUD显示、仪表盘显示、车辆实际ACC设定
+- 风险说明: 无风险，仅为显示修改，不影响控制逻辑
+
+[2025-03-16] - [优化] - 修改BYD默认SpeedFromPCM参数为4
+- 修改文件: system/manager/manager.py
+- 修改内容: 将SpeedFromPCM默认值从"2"改为"4"
+- 目的: BYD车辆默认使用SpeedFromPCM=4模式，显示原车ACC巡航速度
+- 影响范围: 新安装或重置参数的BYD车辆将自动使用正确的HUD显示模式
+- 兼容性: 已设置SpeedFromPCM参数的车辆不受影响，保持用户自定义设置
+- 备注: 仅影响参数默认值，不影响已存在的用户设置
+
+[2025-03-16] - [修复] - 修复BYD HUD速度显示不生效问题
+- 修改文件: selfdrive/controls/controlsd.py
+- 修改文件: system/manager/manager.py
+- 发现问题: SpeedFromPCM=4 只在 pcmCruise=True 时生效，但BYD的pcmCruise依赖BydButtonMode参数
+- 解决方案:
+  1. 在controlsd.py中添加BYD车辆检测逻辑，即使pcmCruise=False也检查SpeedFromPCM
+  2. 在manager.py中添加BydButtonMode默认值"1"，确保BYD默认使用按钮模式
+- 技术细节:
+  1. controlsd.py: 检查车辆名称是否包含"BYD"，如果是则进入SpeedFromPCM逻辑分支
+  2. manager.py: 添加("BydButtonMode", "1")默认参数，使BYD默认pcmCruise=True
+- 预期效果: HUD现在应该正确显示BYD原车ACC巡航速度
+- 测试方法: 检查SpeedFromPCM参数是否为4，BydButtonMode参数是否为1，验证HUD显示
+
+
+[2025-03-17] - [修复] - HUD巡航速度显示修复
+- 修改文件: selfdrive/car/card.py
+- 问题: HUD显示与原车ACC实际速度不一致
+- 原因: vCruiseCluster使用v_cruise_cluster_kph而非cruiseState.speed
+- 解决: 直接使用CS.cruiseState.speed设置vCruiseCluster
+- 验证: 基于驾驶日志0000001f--60db4f6e00分析确认
+- 影响: HUD现在正确显示原车ACC设置的巡航速度
+
+
+[2025-03-17] - [文档] - 更新原车ACC增强系统设计文档
+- 添加HUD巡航速度显示修复记录
+- 包含问题分析、解决方案和验证方法
+- 记录提交哈希93106e4f的详细修复内容
+- 为后续实施提供参考文档
+
+[2026-03-17] - [优化] - BYD按键模式acc_cmd刹车增强功能完整实现
+- 修改文件: safety_byd.h, carcontroller.py, tuning.py, bydcan.py
+- 新增功能: ACC_CMD CAN信号阻塞，场景检测算法，状态机管理
+- 解决问题: 车辆ACC错误，CAN信号冲突，按键模式减速性能
+- 测试验证: 创建完整测试脚本，参数优化，用户干预处理
+- 风险说明: 需要实际车辆测试验证效果
+
+
+[2025-03-17] - [修复] - 低速巡航速度波动问题
+- 修改文件: selfdrive/car/cruise.py
+- 问题: 直道塞车低速和导航限速无变化时巡航速度乱调节
+- 原因: 多处30kph硬编码导致低速时速度强制跳变
+- 解决: 使用_cruise_speed_min(5)替代硬编码30
+- 影响: 低速巡航更稳定，允许最低5kph巡航
+
+[2025-03-12] - [优化] - 改进BYD车辆"漏跟车"问题
+- 修改文件: selfdrive/controls/controlsd.py
+- 修改文件: 参数文件 (CruiseOnDist, StopDistanceCarrot, VEgoStopping)
+- 修改内容: 
+  1. 降低Resume按钮触发阈值: speeds[-1] > 0.1 → speeds[-1] > 0.05
+  2. 减小CruiseOnDist: 250 → 200 (2.5米→2.0米)
+  3. 减小StopDistanceCarrot: 400 → 350 (4.0米→3.5米)
+  4. 降低VEgoStopping: 20 → 15 (0.2 m/s→0.15 m/s)
+- 解决问题: BYD车辆停车后有时不会自动跟车
+- 原理分析: 
+  - speeds[-1] > 0.1条件过于严格，在停车状态下长期计划可能给出很小速度值
+  - CruiseOnDist 2.5米可能过大，前车启动时距离迅速超过阈值
+  - 优化后的参数组合提供更及时的按钮注入
+- 测试验证: 需要在实际驾驶中测试跟车响应
+- 风险说明: 降低阈值可能增加误触发概率，但仍在合理范围内
+
+[2025-03-12] - [优化] - 更新默认参数值
+- 修改文件: system/manager/manager.py
+- 修改内容: 
+  1. StopDistanceCarrot: "400" → "350" (4.0米→3.5米)
+  2. VEgoStopping: "20" → "15" (0.2 m/s→0.15 m/s)
+  3. CruiseOnDist: "250" → "200" (2.5米→2.0米)
+- 解决问题: 确保新安装/重置时获得优化参数
+- 影响范围: 所有新建的车辆配置
+- 测试验证: 需要重启管理器以应用新默认值
+- 风险说明: 修改默认值不会影响已设置的参数，需要手动重置或使用默认设置
+
+[2026-03-19] - [修复] - vTurnSpeed 低速剧烈跳动问题
+
+## 问题发现
+修复E方案后，用户反馈仍然存在巡航速度波动问题。
+分析新的驾驶日志 00000023--592937b4ea 发现：
+- vTurnSpeed 范围：-250 到 +250 kph（极异常）
+- 最大变化幅度：500 kph（剧烈跳动）
+- 变化 > 5 kph 次数：8387 次（占 35%）
+- 低速时平均变化：18.4 kph
+- 低速事件占比：44.7%
+
+## 根本原因
+问题根源在 carrot_man.py 的 vturn_speed() 函数：
+1. 当 orientationRate.z 接近 0 时（直道或低速）
+2. max_curve = max_pred_lat_acc / (v_ego^2) → 0
+3. turnSpeed = sqrt(adjusted_target_lat_a / max_curve) → ∞
+4. 被限制为 250 kph，导致在正常值和 250 kph 间剧烈跳动
+
+## 数据证据
+- 450 个剧烈跳动事件（变化 > 30 kph）
+- 327 个事件中 orientationRate.z < 0.01 rad/s（72.7%）
+- 201 个事件发生在低速时（v_ego < 20 kph，占 44.7%）
+- 低速时平均变化幅度：128.2 kph
+
+## 修复方案
+修改文件：selfdrive/carrot/carrot_man.py (第 1049-1089 行)
+
+添加三重保护机制：
+1. 低速保护：v_ego < 20 kph 时返回 250（不限速）
+2. 横向角速度保护：orientation < 0.01 rad/s 时返回 250
+3. 曲率最小值保护：max_curve 最小为 1e-6，避免除以接近 0 的值
+
+## 测试验证
+- 低速塞车场景：vTurnSpeed 固定为 250 kph，不再跳动
+- 直道行驶场景：vTurnSpeed 固定为 250 kph，避免数值不稳定
+- 弯道行驶场景：正常计算转弯限速，保持原有功能
+
+## 关键参数
+- 低速阈值：20 kph
+- 横向角速度阈值：0.01 rad/s
+- 最小曲率：1e-6
+
+## 修改文件
+- selfdrive/carrot/carrot_man.py
+- selfdrive/carrot/carrot_man.py.backup (备份)
+- 原车acc增强系统设计.md (添加 F 部分)
+- change.log (本记录)
+
+## 解决问题
+- vTurnSpeed 在低速和直道时剧烈跳动
+- 巡航速度因转弯限速跳动而波动
+- 低速塞车时 ACC 速度不稳定
+
+## 风险说明
+需要实际测试验证阈值设置（20 kph, 0.01 rad/s）
+
+[2026-03-19] - [修复] - 优化BYD车辆"漏跟车"问题-前车快速驶离场景
+- 修改文件: selfdrive/controls/controlsd.py (line 305)
+- 问题分析: 分析日志00000023--592937b4ea发现，在某些场景下longitudinalPlan.speeds[-1]值非常低(0.001-0.02)，远低于之前设置的0.05阈值，导致Resume条件不满足
+- 解决方案: 将Resume触发阈值从0.05降低到0.01
+- 详细分析:
+  - 分段60(正常): speeds[-1] = 0.03-0.10, vTargetNow = 0.033-0.035
+  - 分段53(问题): speeds[-1] = 0.001-0.02, vTargetNow = 0.006-0.007
+  - MPC规划的速度轨迹过低导致Resume无法触发
+- 测试验证: 需要在实际驾驶中测试前车快速驶离场景
+- 风险说明: 降低阈值可能导致在不应启动时触发Resume，需要验证
+
+[2026-03-19] - [修复] - 修复carcontroller.py重复return语句
+- 修改文件: opendbc_repo/opendbc/car/byd/carcontroller.py
+- 删除: 第740行重复的 `return False`
+- 原因: _check_scenario_passed函数末尾有重复的return语句
+- 影响: 无功能影响，仅代码清理
+
+[2026-03-19] - [功能] - 场景式acc_cmd刹车增强完整实现
+- 修改文件:
+  - opendbc_repo/opendbc/safety/safety/safety_byd.h
+  - opendbc_repo/opendbc/car/byd/bydcan.py
+  - opendbc_repo/opendbc/car/byd/carcontroller.py
+  - opendbc_repo/opendbc/car/byd/carstate.py
+  - 原车acc增强系统设计.md
+- 核心功能:
+  1. 安全层动态阻断机制：计数器自动同步ACC_CMD发送，阻断MPC→ESC方向
+  2. ACC_CMD字段同步：从原车ACC_CMD复制关键字段，确保平滑过渡
+  3. 场景检测算法：急弯、导航限速、跟车过近、模型转弯
+  4. 用户干预检测：刹车/油门踏板、方向盘转动、取消按钮等
+- 解决问题:
+  - ACC_CMD冲突导致车辆进入ERROR状态
+  - 按键模式下减速性能不足
+  - 原车ACC和openpilot同时发送ACC_CMD冲突
+- 技术亮点:
+  - 计数器机制自动同步，无需Python层协调
+  - 阻断MPC→ESC正确方向
+  - 字段默认值基于实际驾驶数据分析
+- 待验证:
+  - 实车测试ACC不退出
+  - 场景检测阈值调优
+  - 原车ACC恢复平滑性
+
+[2026-03-19] - [修复] - 修复brake_enhance无法触发的问题
+- 问题根因:
+  1. CURVATURE_BRAKE_THRESHOLD = 0.15 太大（实际曲率0.001-0.05）
+  2. CC.longActive=False 导致ACC_CMD发送逻辑被跳过
+  3. 导航限速检测需要xSpdDist>50但实际为0
+- 修改文件:
+  - opendbc_repo/opendbc/car/byd/tuning.py
+  - opendbc_repo/opendbc/car/byd/carcontroller.py
+- 修复内容:
+  1. 调整场景检测阈值:
+     - CURVATURE_BRAKE_THRESHOLD: 0.15 → 0.008
+     - FOLLOW_DISTANCE_BRAKE_THRESHOLD: 30 → 20
+     - SPEED_DIFF_BRAKE_THRESHOLD: 15 → 5
+  2. 修改ACC_CMD发送逻辑:
+     - if CC.longActive: → if CC.longActive or self.brake_enhance_active:
+     - 按键模式下刹车增强激活时也能发送ACC_CMD
+  3. 简化导航限速检测:
+     - 移除xSpdDist距离检查，直接使用desiredSpeed
+- 测试验证: 需要重新录制日志验证功能
+
+[2026-03-19] - [修复] - 修复弯道时用户干预检测误触发问题
+- 问题根因:
+  1. MIN_CURVE_BRAKE_SPEED = 8.0 m/s 太高，实际速度只有 3.75-7.97 m/s
+  2. 方向盘转角 > 30度 被视为用户干预，但弯道时转角可达165度
+  3. 方向盘扭矩 > 3.0 Nm 被视为用户干预，但弯道时扭矩可达216 Nm
+- 修改文件:
+  - opendbc_repo/opendbc/car/byd/tuning.py
+  - opendbc_repo/opendbc/car/byd/carcontroller.py
+- 修复内容:
+  1. tuning.py: MIN_CURVE_BRAKE_SPEED: 8.0 → 3.0 m/s (10.8 km/h)
+  2. carcontroller.py: 移除方向盘转角和扭矩的用户干预检测
+     - 弯道时转角和扭矩会很大，不应作为用户干预条件
+     - 保留: 刹车/油门踏板、取消按钮、速度异常、横向控制失效
+
+[2026-03-19] - [修复] - 修复弯道减速target_speed计算逻辑错误
+- 问题根因:
+  原公式: target_speed = max(30.0, 80.0 - curvature * 300)
+  假设车辆在80km/h高速行驶，但实际只有10.8km/h
+  导致: 当前速度(10.8km/h) < 目标速度(67.3km/h)，不减速反而加速
+- 修复方案:
+  基于横向加速度限制计算安全速度: safe_speed = sqrt(a_lat_max / curvature)
+  只有当前速度 > 安全速度 + 5km/h 时才触发减速
+- 物理原理:
+  横向加速度 a_lat = v² × curvature
+  安全速度 v_safe = sqrt(a_lat_max / curvature)
+  MAX_LAT_ACCEL = 2.0 m/s² (舒适过弯的最大横向加速度)
+- 新逻辑效果:
+  - 低速过弯(当前速度已安全): 不触发减速 ✓
+  - 高速过弯(当前速度过高): 触发减速 ✓
+- 注意: 本次日志中所有弯道都是低速过弯，车速已经在安全范围内
+
+[2026-03-19] - [优化] - 增强弯道减速效果
+- 问题根因:
+  1. BRAKE_GAIN_CURVE=0.15太小，减速指令只有-0.117 m/s²
+  2. MIN_BRAKE_CMD=-0.05限制了最小减速，实际应该允许更大的减速
+- 修改内容:
+  - MAX_BRAKE_CMD: -1.5 → -2.0 (允许更强刹车)
+  - MIN_BRAKE_CMD: -0.05 → 0.5 (允许小幅度加速)
+  - BRAKE_GAIN_CURVE: 0.15 → 0.5 (增强减速)
+  - BRAKE_GAIN_SPEED_LIMIT: 0.12 → 0.4
+  - BRAKE_GAIN_FOLLOWING: 0.2 → 0.5
+- 效果:
+  - 减速指令从-0.117增强到-0.389 m/s² (3.3倍)
+  - 预期弯道减速更明显
+
+[2026-03-19] - [修复] - 修复ACC未启用时发送ACC_CMD导致车辆故障
+- 问题根因:
+  1. brake_enhance_active在ACC未启用时仍然激活
+  2. 直控模式(speed_from_pcm==1)未检查ACC启用状态
+  3. 导致ACC未启用时openpilot发送ACC_CMD，车辆进入fault状态
+- 修复内容:
+  1. _update_brake_enhancement: 添加ACC启用检查
+     - if not CS.out.cruiseState.enabled: 立即退出
+  2. should_send_acc_cmd: 添加ACC启用条件
+     - 旧: speed_from_pcm == 1 or brake_enhance_active
+     - 新: cruiseState.enabled and (speed_from_pcm == 1 or brake_enhance_active)
+- 影响:
+  - 防止ACC未启用时发送ACC_CMD
+  - 避免车辆进入fault状态
+
+[2026-03-21] - [修复] - ACC 取消问题修复
+
+问题描述：
+- 车辆在行驶中 ACC 会自动取消，AccState 从 3 变为 2
+- 取消时 vEgo 正常（约 96km/h），不是静止状态
+- 取消前 ACC_CMD 数量为 0，原车没有发送 ACC_CMD
+
+根因分析：
+1. openpilot 发送 ACC_EPS_STATE (0x318) 给 MPC
+2. create_fake_318 函数在 laks_active=0 但 laks_reqprepare=1 时
+   会错误地设置 CruiseActivated=0
+3. 这导致 MPC 收到错误的 ACC 状态信号
+4. MPC 可能因此发送错误的 ACC 状态给其他控制器
+
+修复内容：
+- 修改 opendbc_repo/opendbc/car/byd/bydcan.py
+- create_fake_318 函数在 laks_reqprepare 和 else 分支中
+  不再覆盖 CruiseActivated 字段
+- CruiseActivated 现在保持从原车 ESC 消息中读取的值
+
+修改文件：
+- opendbc_repo/opendbc/car/byd/bydcan.py: 修复 create_fake_318 逻辑
+
+风险说明：
+- 需要测试验证 ACC 不再自动取消
+- CruiseActivated 现在始终跟随原车状态
+
+验证方法：
+- 实车测试，观察 ACC 是否还会自动取消
+- 检查日志中 CruiseActivated 字段是否正确
+
+[2026-03-22] - [分析] - BYD ACC雷达点云数据验证
+- 分析了RADAR_TRACK (0x590-0x5AF) 和 RADAR_SPEED (0x550-0x56F) 的CAN消息
+- 发现这些是原始雷达点云数据，不是处理后的前车目标
+- RADAR_TRACK距离与视觉前车距离相关性极低 (r=0.23)
+- RADAR_SPEED速度解码验证通过 (r=0.92, RMSE=3.7m/s)
+- 更新了 byd_acc_radar.dbc，将LONG_DIST改为LONG_DIST_RAW
+- 更新了 BYD_ACC_Lead_Target_Analysis.md 文档
+- 数据来源: 路线 00000039--c69e11054d (10分段)
+
+[2026-03-22] - [分析] - BYD ACC雷达点云DBC深度验证
+- 深入分析了RADAR_SPEED和RADAR_TRACK的所有信号
+- 验证结果:
+  ✓ ABS_SPEED_RAW: r=0.58, RMSE=5.0m/s (可用)
+  ✗ LONG_DIST_RAW: r=0.24 (不可直接用于距离)
+  △ ANG_RAW0/1: 需要弯道数据验证
+  △ STATUS_B: 含目标状态信息
+  △ LAT_SIGNAL: 与yRel相关性低
+- 更新了byd_acc_radar.dbc的头部注释
+- 添加了详细的验证状态表格
+- 数据来源: 路线 00000039--c69e11054d (4867条匹配数据)
+
+[2026-03-22] - [重大更新] - BYD ACC雷达DBC定义修正
+- 参考Toyota/ESR/Mazda等车辆雷达DBC格式
+- RADAR_SPEED (0x550-0x56F):
+  - REL_SPEED: 添加正确的scale=0.001874, offset=-55.55
+  - 公式: vRel = RAW * 0.001874 - 55.55 (m/s)
+  - 验证: r=0.59, RMSE=5.7m/s
+  - 信号名从ABS_SPEED_RAW改为REL_SPEED
+- RADAR_TRACK (0x590-0x5AF):
+  - 距离数据不可直接使用 (r≈0.25)
+  - 保持RAW格式，标注为原始点云数据
+  - 推荐使用RADAR_MRR (0x374)作为前车距离
+- 数据来源: 路线 00000039--c69e11054d (4867条匹配数据)
+
+
+[2026-03-22] - [重大发现] - BYD ACC雷达目标索引代表横向角度
+关键发现：
+- 目标索引本身代表横向角度，不是随机分配
+- 目标0: 正前方 (41.9%匹配视觉前车)
+- 目标1-2: 近中心 (合计25%匹配前车)
+- 目标3-14: 逐渐偏离中心
+
+验证结果：
+- 目标索引 vs SPEED_BYTE5: r=-0.98 (强相关)
+- BYTE5不是横向距离，可能是RCS/信号强度
+- 角度信号(b0-128, b1-128)变化范围小(±20)，当前数据主要是直行
+
+DBC更新：
+- 更新了头部注释，说明目标索引含义
+- BYTE5保持RAW格式
+- 数据来源: 路线 00000039--c69e11054d
+
+[2026-03-23] - [修复] - 同步radar_interface.py与DBC信号名
+- 修改文件: opendbc/car/byd/radar_interface.py
+- 解决问题: KeyError: 'LONG_DIST' (DBC信号名已更改)
+- 信号名映射: LONG_DIST→LONG_DIST_RAW, ABS_SPEED_RAW→REL_SPEED, STATUS_B→STATUS
+- 简化速度解码: 直接使用DBC解码的REL_SPEED值
+
+[2025-03-23] - [修复] - 修复刹车增强状态机问题：brake_phase 从未进入 braking 状态
+- 问题分析：
+  1. 刹车增强激活时，目标速度 = 当前速度 * 0.9（只降低 10%）
+  2. 激活后立即检查：当前速度 <= 目标速度 + 3.0 km/h
+  3. 由于目标速度太接近当前速度，导致立即进入 holding 状态
+  4. 例如：车速 16.7 km/h，目标 15.0 km/h，判断 16.7 <= 18.0 → True
+- 修复方案：
+  1. 增大减速比例：10%/15%/20%/25% → 15%/20%/25%/30%
+  2. 添加最小 braking 持续时间：至少 30 帧（3 秒）
+  3. 加快减速度响应：max_change 从 0.1 增大到 0.2 m/s²
+- 修改文件：
+  - opendbc_repo/opendbc/car/byd/carcontroller.py
+    - 第 701-708 行：增大减速比例
+    - 第 652-666 行：添加最小 braking 持续时间和调试日志
+    - 第 862-866 行：增大 max_change
+- 预期效果：
+  - 刹车增强激活后，至少维持 3 秒的 braking 状态
+  - 减速度更快达到目标值
+  - 弯道减速效果更明显
+
+[2025-03-23] - [修复] - ACC_CMD 发送到错误的总线
+- 问题发现：
+  1. openpilot 发送 ACC_CMD 到 ESC 总线 (bus=0)
+  2. 但原车 ACC_CMD 只出现在 MPC 总线 (bus=2)
+  3. ESC 控制器监听的是 MPC 总线，而不是 ESC 总线
+  4. 导致 openpilot 的减速指令没有被 ESC 接收
+  5. MPC 继续发送加速指令，导致巡航取消
+- 根本原因：
+  - bydcan.py 第 132 行：发送到 CanBus.ESC (bus=0)
+  - 应该发送到 CanBus.MPC (bus=2)
+- 修复方案：
+  - 将 ACC_CMD 发送总线从 CanBus.ESC 改为 CanBus.MPC
+- 修改文件：
+  - opendbc_repo/opendbc/car/byd/bydcan.py
+    - 第 132 行：CanBus.ESC → CanBus.MPC
+    - 第 134 行：CanBus.ESC → CanBus.MPC
+- 预期效果：
+  - ACC_CMD 能够被 ESC 控制器接收
+  - 刹车增强功能正常工作
+  - 不再与 MPC 的指令冲突
+
+[2025-03-23] - [修复] - Bug #8: 刹车增强 ACC_CMD 发送阈值过高
+
+问题分析：
+- 日志显示 "发送 ACC_CMD" 但 sendcan 中没有 ACC_CMD
+- 原因1: ACC_CMD 地址是 814 (0x32E)，不是之前假设的 0x1D0
+- 原因2: ACC_CMD 发送阈值 -0.05 太高，holding 阶段的 -0.015~-0.04 无法发送
+- 原因3: braking 阶段只持续 3 秒就进入 holding，减速时间太短
+
+修复内容：
+- 修改文件: tuning.py
+  - SPEED_HOLD_TOLERANCE: 3.0 → 1.5 km/h（更严格）
+  - HOLDING_BRAKE_GAIN: 0.03 → 0.05（适当增加）
+  - MAX_HOLDING_BRAKE: -0.3 → -0.5 m/s²（允许更强减速）
+  - 新增 ACC_CMD_MIN_ACCEL = -0.01 m/s²（发送阈值）
+- 修改文件: carcontroller.py
+  - ACC_CMD 发送阈值: -0.05 → -0.01 m/s²
+  - 最小 braking 持续时间: 30帧(3秒) → 60帧(6秒)
+
+验证结果（日志 00000043）：
+- ACC_CMD 确实发送到了 MPC 总线 (bus=2, addr=814)
+- 分段1: 59次 ACC_CMD，速度从 32.1→30.3 km/h（下降 1.9 km/h）
+- 巡航保持激活（Bug #7 修复生效）
+
+风险说明: 需要实车验证更强的减速效果是否舒适
+
+
+[2025-03-23] - [修复] - Bug #9: ACC_CMD 发送到错误总线被 Safety 层丢弃
+
+问题分析：
+- Safety 层 TX_MSGS 只允许 ACC_CMD 发送到 ESC 总线 (bus=0)
+- 但 bydcan.py 发送到 MPC 总线 (bus=2)
+- 导致 openpilot 的 ACC_CMD 被 Safety 层丢弃，从未实际发送
+- 用户反馈：没有任何减速效果
+
+修复内容：
+- 修改文件: bydcan.py
+  - ACC_CMD 发送总线: CanBus.MPC → CanBus.ESC
+- 修改文件: safety_byd.h
+  - 阻断帧数: 5帧(100ms) → 10帧(200ms)
+
+CAN 总线架构确认：
+- ESC 总线 (bus=0): 底盘控制总线，ESC 控制器监听此总线
+- MPC 总线 (bus=2): 多媒体控制总线，原车 ACC 控制器发送 ACC_CMD
+
+原车 ACC_CMD 分布（日志 00000044）：
+- ESC 总线: 447 条 (转发自 MPC)
+- MPC 总线: 2999 条 (原车 ACC 控制器)
+
+风险说明: 需要实车验证 ESC 是否正确响应 openpilot 的 ACC_CMD
+
+
+[2025-03-23] - [重构] - Safety 层阻断逻辑：从计数器改为状态标识
+
+问题分析：
+- 原车 ACC_CMD 发送频率 50Hz (每20ms)
+- openpilot 发送频率较低 (平均78ms)
+- 基于计数器的阻断 (200ms) 会很快过期，原车 ACC_CMD 会穿透
+
+新设计：
+- Safety 层使用持久状态标志 byd_block_original_acc
+- 通过 ACC_CMD 的 AccControlActive 字段控制阻断
+- AccControlActive=1: 设置阻断标志，持续阻断原车 ACC_CMD
+- AccControlActive=0: 清除阻断标志，恢复原车 ACC 控制
+
+修改文件：
+- safety_byd.h:
+  - 移除计数器 byd_acc_cmd_block_counter
+  - 添加状态标志 byd_block_original_acc
+  - tx_hook 检测 AccControlActive 字段 (字节5位4)
+  - fwd_hook 使用状态标志判断是否阻断
+
+- carcontroller.py:
+  - 添加 brake_enhance_ending 标志
+  - 刹车增强结束时发送 AccControlActive=0 的 ACC_CMD
+
+- bydcan.py:
+  - 已支持 longActive 参数控制 AccControlActive
+
+逻辑流程：
+1. openpilot 发送 AccControlActive=1 → 阻断原车 ACC_CMD
+2. 持续发送 → 持续阻断
+3. 发送 AccControlActive=0 → 恢复原车 ACC 控制
+
+
+[2025-03-23] - [修复] - Bug #10: 阻断原车 ACC_CMD 但未发送控制指令导致巡航报错
+
+问题分析：
+- brake_enhance_active=True 时，Safety 层阻断原车 ACC_CMD
+- 但 accel_to_send=-0.002~-0.008，大于阈值 -0.01
+- 导致：阻断原车 + 不发送 ACC_CMD → ESC 无控制指令 → 巡航报错
+
+日志分析 (00000045):
+- 8599.806s: brake_enhance_active=True，阻断开始
+- 8603.8s: accel_to_send=-0.002~-0.008 (holding 阶段，速度已接近目标)
+- 8604.05s: 巡航报错退出
+
+修复内容：
+1. 只要 brake_enhance_active=True 就发送 ACC_CMD，不再检查阈值
+2. ACC 未启用时发送恢复指令
+3. 用户干预时发送恢复指令
+
+逻辑修正：
+- brake_enhance_ending=True → 发送 AccControlActive=0 恢复原车
+- brake_enhance_active=True → 发送 AccControlActive=1 阻断原车
+- 都不是 → 不发送，原车 ACC 正常控制
+
+
+[2025-03-23] - [修复] - Bug #11: 刹车增强结束后立即重新激活导致巡航报错
+
+问题分析：
+- 日志 00000046 显示：
+  - 9054.108s: 发送恢复指令 AccControlActive=0
+  - 9054.116s: 又检测到 speed_limit 场景，重新激活
+  - 9054.132s: 又发送 ACC_CMD
+  - 9054.160s: 巡航退出
+- 根本原因：场景检测没有冷却期，刚恢复就又触发新场景
+
+修复内容：
+- 添加 brake_cooldown_frame 冷却帧计数器
+- 发送恢复指令后设置冷却期 300帧（30秒）
+- 冷却期内不允许重新激活刹车增强
+- ACC 未启用、用户干预、正常结束时都设置冷却期
+
+逻辑流程：
+1. 刹车增强结束 → 发送恢复指令 → 设置冷却帧
+2. 冷却期内检测到刹车场景 → 不激活，重置计数器
+3. 冷却期后 → 允许重新激活
+
+
+[2025-03-23] - [修复] - Bug #12: 恢复指令无法发送因为 should_send_acc_cmd 条件错误
+
+问题分析：
+- 当 `brake_enhance_active=False` 时，`should_send_acc_cmd=False`
+- 不会进入 ACC_CMD 发送逻辑
+- `brake_enhance_ending=True` 的恢复指令永远不会发送
+
+日志 00000047 验证：
+- 9452.619s: active=True → False (状态机退出)
+- 9452.779s: 巡航退出 (160ms后)
+- 没有恢复指令日志
+
+修复：
+- `should_send_acc_cmd` 条件增加 `or self.brake_enhance_ending`
+- 即使 `brake_enhance_active=False`，也能进入发送逻辑发送恢复指令
+
+[2026-03-23] - [Bug修复] - 修复恢复指令 AccControlActive 未正确设置为 0 的问题
+- 修改文件: opendbc_repo/opendbc/car/byd/bydcan.py
+- 问题原因: 当 longActive=False 时，没有显式设置 AccControlActive=0，导致该字段保持原车值（可能是1）
+- 修复方案: 添加 else 分支，显式设置 AccControlActive=0 和相关控制字段
+- 预期效果: 恢复指令能正确恢复原车 ACC 控制
+- 测试验证: 需要实际测试确认巡航不会退出
+
+[2026-03-24] - [Bug修复] - 修复刹车增强激活时未重置 deactivate_counter 导致快速退出
+- 修改文件: opendbc_repo/opendbc/car/byd/carcontroller.py
+- 问题原因: 激活刹车增强时只重置了 activate_counter，未重置 deactivate_counter
+- 影响: 如果之前有累积的 deactivate_counter 值，激活后可能很快达到阈值退出
+- 修复: 激活时同时重置 brake_deactivate_counter = 0
+- 测试验证: 需要实际测试确认刹车增强能持续足够长时间
+
+[2026-03-24] - [重构] - 重写BYD ACC雷达DBC文件
+- 修改文件: opendbc_repo/opendbc/dbc/byd_acc_radar.dbc
+- 修改文件: opendbc/car/byd/radar_interface.py
+- 解决问题: DBC定义完全错误，使用物理单位替代RAW
+- 验证结果:
+  * LONG_DIST: (byte1<<8|byte0) * 0.01 m, r=0.774
+  * REL_SPEED: (byte3<<8|byte2) * 0.001695 - 49.1 m/s, r=0.804
+  * LAT_DIST: byte2 * 0.1 - 12.7 m
+- 数据来源: 路线 00000049--1f85adee96
+
+[2025-03-25] - [优化] - 避免按键减速和刹车增强同时触发
+- 修改文件: selfdrive/car/cruise.py
+- 新增功能: 在 _carrot_command 中检测刹车增强场景，跳过 SPEED DOWN 命令
+- 解决问题: 当刹车增强检测到弯道/限速场景时，不再同时调节巡航速度
+- 逻辑说明: 如果 desiredSource 是 atc/cam/route 等刹车增强场景，且 desiredSpeed < vEgo-5，则跳过 SPEED DOWN
+- 风险说明: 需要确保 desiredSource 字段正确反映刹车增强场景
+
+[2025-03-25] - [优化] - 刹车增强优先，按键减速作为兜底方案
+- 修改文件: 
+  - opendbc_repo/opendbc/car/byd/carcontroller.py
+  - selfdrive/car/cruise.py
+- 设计逻辑:
+  1. 刹车增强优先：发送 ACC_CMD 减速
+  2. 按键减速兜底：如果刹车增强未激活，使用按键调节巡航速度
+- 实现方式:
+  - carcontroller.py: 将 brake_enhance_active 写入 Params
+  - cruise.py: 读取 BrakeEnhanceActive，如果为 True 则跳过 SPEED DOWN
+- 解决问题: 避免刹车增强和按键减速同时触发
+- 风险说明: 需要确保 Params 读写及时，避免状态不同步
+
+[2025-03-25] - [优化] - 刹车增强优先，按键减速作为兜底方案
+- 修改文件: 
+  - opendbc_repo/opendbc/car/byd/carcontroller.py
+  - selfdrive/car/cruise.py
+- 设计逻辑:
+  1. 刹车增强优先：尝试发送 ACC_CMD 减速
+  2. 按键减速兜底：如果刹车增强未激活（冷却期/防抖期间），使用按键调节巡航速度
+- 实现方式:
+  - carcontroller.py:
+    - 添加 self._params_memory 用于写入 CarrotSpeed
+    - 当 need_brake=True 但刹车增强无法激活时，设置 CarrotSpeed=-target_speed
+  - cruise.py:
+    - 修改 CarrotSpeed 负值处理，默认行为是直接设置为目标速度
+    - 不再依赖 smartSpeedControl 配置
+- 触发条件:
+  - 防抖期间：brake_activate_counter < BRAKE_ACTIVATE_DEBOUNCE
+  - 冷却期内：frame < brake_cooldown_frame
+- 风险说明: 需要确保 params_memory 读写及时，避免状态不同步
+
+[2025-03-25] - [优化] - 刹车增强效果检测与按键减速兜底
+- 修改文件: 
+  - opendbc_repo/opendbc/car/byd/carcontroller.py
+  - selfdrive/car/cruise.py
+- 设计逻辑:
+  1. 刹车增强优先：发送 ACC_CMD 减速
+  2. 效果检测：检测车速是否下降
+  3. 按键减速兜底：如果刹车增强无效，启用按键减速
+- 判断刹车增强是否生效的方法:
+  - 记录刹车增强开始时的车速
+  - 如果车速下降超过 2 km/h，说明有效果，重置计数器
+  - 如果车速持续不下降，增加无效计数器
+  - 如果连续 50 帧（5秒）车速没有下降，触发按键减速兜底
+- 实现细节:
+  - carcontroller.py:
+    - 添加 brake_start_speed, brake_no_effect_counter, brake_fallback_active 变量
+    - 添加 self._params_memory 用于写入 CarrotSpeed
+    - 在 braking 阶段检测车速变化
+    - 当刹车增强无效时，设置 CarrotSpeed=-target_speed
+  - cruise.py:
+    - 修改 CarrotSpeed 负值处理，默认直接设置为目标速度
+- 风险说明: 需要确保 params_memory 读写及时，避免状态不同步
+
+
+[2026-03-25] - [重大修复] - 刹车增强目标速度计算逻辑重构
+
+修改文件:
+1. opendbc_repo/opendbc/car/byd/carcontroller.py
+   - 完全重写 _detect_brake_scenario 函数
+   - 新策略：多场景收集目标速度，选择最小值
+   - 曲率目标速度：基于物理原理，平滑连续计算
+   - 优先级：曲率 > 模型 > 导航 > 跟车
+   
+2. opendbc_repo/opendbc/car/byd/tuning.py
+   - MAX_BRAKE_CMD: -2.0 → -3.5 m/s²（允许更强刹车）
+   - BRAKE_GAIN_CURVE: 0.5 → 0.8（增强减速）
+   - BRAKE_GAIN_SPEED_LIMIT: 0.4 → 0.7（增强减速）
+   - CURVATURE_BRAKE_THRESHOLD: 0.008 → 0.005（更早检测）
+   - CURVATURE_PASS_THRESHOLD: 0.003 → 0.002（不轻易退出）
+   - BRAKE_ACTIVATE_DEBOUNCE: 5 → 3（快速响应）
+   - BRAKE_DEACTIVATE_DEBOUNCE: 8 → 10（稳定退出）
+
+解决问题:
+- Bug #18: 曲率目标速度计算使用分段 if 判断，不平滑
+- Bug #19: 导航数据优先级高于视觉曲率，可能错误
+- Bug #20: 刹车增强效果不佳，58km/h 通过急弯仅减速 4km/h
+
+关键改进:
+1. 曲率目标速度：从分段 if 改为平滑公式（曲率越大速度越小）
+2. 多场景决策：收集所有候选目标速度，选择最小值
+3. 优先级正确：视觉曲率优先于导航数据
+4. 参数优化：增强刹车力度，快速响应，稳定退出
+
+测试验证:
+- 新逻辑：曲率 0.0069（半径145m）→ 目标速度 51 km/h
+- 新逻辑：曲率 0.010（半径100m）→ 目标速度 42 km/h
+- 新逻辑：曲率 0.015（半径67m）→ 目标速度 35 km/h
+- 变化平滑连续，无跳跃
+
+风险说明:
+- 刹车力度增强，需要实际测试验证舒适性和安全性
+- 如果刹车过猛，可降低 BRAKE_GAIN 参数
+
+
+[2026-03-25] - [重大修复] - 刹车增强直道误触发和刹车请求断续问题
+
+修改文件:
+1. opendbc_repo/opendbc/car/byd/carcontroller.py
+   - 导航限速检测添加曲率检查，避免直道误触发
+   - 导航限速合理性验证：限速 < 30km/h 时必须在弯道附近
+   - 修复 Bug #21：导航限速 20km/h 在直道触发刹车增强
+
+2. opendbc_repo/opendbc/car/byd/bydcan.py
+   - 修复 Bug #22：刹车请求位断断续续
+   - 发现：ESC 通过字节0的 bit 0 判断刹车请求
+   - 奇数 = 刹车请求，偶数 = 无刹车请求
+   - 修复：当 accel < 0 时强制字节0为奇数，确保刹车请求位始终为1
+
+解决问题:
+- Bug #21: 导航限速数据不准确，在直道触发刹车增强
+  - 症状：2185.42s 曲率 0.0003（直道），导航限速 20km/h，错误激活
+- Bug #22: 刹车请求断断续续，减速效果差
+  - 症状：8个刹车段，平均时长 0.12秒，刹车请求比例仅 38%
+  - 根因：AccelCmd 编码后字节0在奇偶之间波动，导致刹车请求位不稳定
+
+关键发现:
+- ACC_CMD 字节0包含 AccelCmd 和刹车请求位
+- 编码公式：raw = (accel + 5) / 0.05
+- 刹车请求位 = 字节0的 bit 0
+- 奇数值（77, 79, 81...）→ 刹车请求 = 1
+- 偶数值（78, 80, 82...）→ 刹车请求 = 0
+
+测试验证:
+- 新日志 00000054--1e8555444c 两个90度急弯
+- 弯道1：减速 1.9km/h（速度已很低，基本合理）
+- 弯道2：减速仅 2.6km/h（应该减速 11km/h）❌
+- 修复后：刹车请求位持续为1，减速效果应该提升 ✅
+
+风险说明:
+- 字节0调整略微增加减速力度，需验证舒适性
+- 导航限速检查可能过滤掉部分有效的限速信息
+
+
+[2026-03-25] - [关键修复] - 刹车请求位和导航限速检测优化
+
+修改文件:
+1. opendbc_repo/opendbc/car/byd/bydcan.py
+   - 修复条件：accel < 0 改为 accel <= 0
+   - 原因：当速度接近目标时，accel ≈ 0，字节0 = 100（偶数）
+   - 字节0 = 100 时刹车请求 = 0，导致速度无法精确维持
+   - 修复后：即使 accel = 0 也强制字节0为奇数
+
+2. opendbc_repo/opendbc/car/byd/carcontroller.py
+   - 导航限速检测：严格检查 xSpdType
+   - xSpdType > 0：有明确限速信息，信任导航数据
+   - xSpdType == -1：限速不确定，必须在弯道附近才触发
+   - 额外检查：曲率 < 0.003 时禁用导航限速（避免直道误触发）
+
+解决问题:
+- Bug #23: 字节0 = 100 时刹车请求 = 0
+  - 症状：弯道1 字节0=100 出现697次，刹车请求 0%
+  - 根因：accel = 0 时，字节0 = 100（偶数），不满足修复条件
+- Bug #24: 导航限速在直道误触发
+  - 症状：xSpdType = -1 时在曲率 0.0011（直道）触发
+  - 根因：has_limit_info 使用 or，xTurnInfo > 0 就满足
+
+测试验证:
+- 新日志 00000055--087cdee924 整体刹车请求比例 48.4%（提升）
+- 弯道3 刹车请求比例 80.9%（非常好）
+- 弯道1、2 刹车请求比例仍偏低（字节0=100 问题）
+
+预期效果:
+- 字节0=100 被强制调整为 99（奇数），刹车请求持续为1
+- 直道不再因导航限速误触发
+- 弯道刹车请求比例应该接近 100%
+
+
+[2026-03-25] - [最终修复] - 确保所有情况下刹车请求位为1
+
+修改文件:
+1. opendbc_repo/opendbc/car/byd/bydcan.py
+   - 简化修复策略：只要 longActive=True，强制字节0为奇数
+   - 移除 accel 条件，确保所有情况下刹车请求位都是 1
+   - 原因：之前的条件 `accel <= 0` 可能漏掉某些情况
+
+2. opendbc_repo/opendbc/car/byd/carcontroller.py
+   - 缓存 brake_accel 值，避免两次调用返回不同值
+   - 确保发送的 accel 和 actuators.accel 一致
+
+解决问题:
+- Bug #25: 字节0=100 仍然出现，刹车请求 = 0
+  - 症状：新日志中字节0=100 出现 4339 次
+  - 原因：修复条件 `accel <= 0` 可能不够全面
+  - 修复：只要 longActive=True 就强制字节0为奇数
+
+重要提示:
+- 代码修改后需要 **重启 openpilot 进程** 才能生效
+- 建议重新部署并录制新日志验证效果
+
+预期效果:
+- 所有 longActive=True 的情况下，字节0都是奇数
+- 刹车请求比例应该接近 100%
+
+
+[2026-03-26] - [优化] - 按键减速优化：当前车速低于目标速度时不调整
+
+修改文件:
+1. selfdrive/car/cruise.py
+   - 添加检查：当前车速 <= 目标速度时跳过按键减速
+   - 避免不必要的巡航速度调整
+   - 使用实际车速（CS.vEgo）而不是巡航速度
+
+解决问题:
+- Bug #26: 当前车速低于目标速度时仍降低巡航速度
+  - 症状：车速已经低于目标速度，但仍触发按键减速
+  - 优化：只有当前车速 > 目标速度时才调整
+
+优化效果:
+- 减少不必要的巡航速度调整
+- 提升驾驶舒适性
+- 刹车增强和按键减速更加协调
+
+设计说明:
+- 刹车增强：弯道减速（ACC_CMD）
+- 按键减速：直道限速（历史学习）
+- 两者可以同时工作，互为补充
+
+
+[2026-03-26] - [严重修复] - 恢复导航弯道引导功能
+
+修改文件:
+1. opendbc_repo/opendbc/car/byd/carcontroller.py
+   - 完全重构导航数据检测逻辑
+   - 区分两种场景：弯道引导 vs 限速信息
+
+解决问题:
+- Bug #27: 导航引导入弯完全失效
+  - 症状：1409次弯道引导，刹车增强激活0次
+  - 根因：e0955f9 强制禁用曲率 < 0.003 的导航限速
+  - 影响：所有导航引导入弯都失效
+
+关键修复:
+1. 场景分离：
+   - 弯道引导（xTurnInfo > 0）：信任导航数据，提前减速
+   - 限速信息（desiredSpeed）：需要严格检查
+
+2. 弯道引导逻辑：
+   - 使用 vTurnSpeed（建议转弯速度）
+   - 不再强制检查曲率
+   - 提前减速，安全入弯
+
+3. 限速信息逻辑：
+   - xSpdType > 0：信任
+   - xTurnInfo > 0：信任（有弯道引导）
+   - 曲率 > 阈值：参考
+
+设计理念:
+- 导航弯道引导是最可靠的数据，应该信任
+- 导航限速可能错误，需要严格检查
+- 提前减速比等到曲率变大更安全
+
+测试验证:
+- 需要新日志验证弯道引导是否正常工作
+- 检查 vTurnSpeed 数据是否合理
+
+
+[2026-03-26] - [修复] - Resume 按钮巡航速度设置逻辑
+
+修改文件:
+1. opendbc_repo/opendbc/car/byd/carcontroller.py
+   - 修改 Resume 按钮逻辑
+   - 检查原车 ACC 保存的巡航速度
+   - 如果原车 ACC 巡航速度有效（> 10 km/h），使用 BTN_AccUpDown_Cmd=3
+   - 如果原车 ACC 巡航速度为空或异常，使用 BTN_AccUpDown_Cmd=1（使用当前车速）
+
+BYD 按钮命令定义（TN_AccUpDown_Cmd）：
+- 0: 无操作
+- 1: 使用当前车速
+- 3: 获取原车ACC保存的巡航速度
+
+解决问题:
+- Bug #28: Resume 时巡航速度设置不正确
+  - 症状：非第一次启动时，巡航速度可能设置为 30 km/h
+  - 原因：Resume 未检查原车 ACC 保存的速度
+  - 修复：根据原车 ACC 保存的速度选择合适的按钮命令
+
+注意:
+- BYD 在 ACC 激活时，巡航速度会暂时显示为 30 km/h（见 Line 269 注释）
+- 稳定期逻辑（Line 271-286）用于捕获实际的巡航速度
+
+
+[2026-03-26] - [修复] - 按键减速时检查油门状态和车速
+
+修改文件:
+1. opendbc_repo/opendbc/car/byd/carcontroller.py
+   - Line 1121-1145: 按键减速逻辑添加油门和车速检查
+   - Line 1088-1100: 更新按钮命令定义注释
+
+解决问题:
+- Bug #29: 油门踩下且车速 > 巡航速度时，仍降低巡航速度
+  - 症状：车速 44.8km/h，巡航 35km/h，油门踩着，巡航被降到 30km/h
+  - 根因：按键减速逻辑只检查目标速度 < 巡航速度，未考虑油门和实际车速
+  - 影响：驾驶员加速超车时巡航速度被错误降低
+
+关键修复:
+1. 添加油门检查：gasPressed = True 时跳过减速
+2. 添加车速检查：v_ego > cruise_speed + 5km/h 时跳过减速
+3. 两个条件都满足才跳过：油门踩着 + 车速明显高于巡航速度
+
+修正注释:
+- 原注释错误描述 BTN_AccUpDown_Cmd=1/3 的行为
+- DBC 定义：1=DOWN_SETSPEED（减速），3=UP_RESETSPEED（加速）
+- 更新为 DBC 中的准确定义
+
+DBC 来源:
+- opendbc_repo/opendbc/dbc/byd_han_dmev_2020.dbc
+- VAL_ 944 BTN_AccUpDown_Cmd 0 "NOTPRESSED" 1 "DOWN_SETSPEED" 3 "UP_RESETSPEED"
+
+测试验证:
+- 需要新日志验证修复效果
+- 检查油门踩着时是否仍会降低巡航速度
+[2026-03-27] - [修复] - 修复 Bug #26：当前车速低于目标速度时仍降低巡航速度
+- 修改文件: selfdrive/carrot/carrot_functions.py
+- 问题根因: carrot_man.desiredSpeed 无条件使用 min() 降低巡航速度，未检查当前车速
+- 解决方案: 添加当前车速检查，只有 v_ego_kph > desiredSpeed 时才降低巡航速度
+- 测试验证: 驾驶日志 0000005d--50e66f9ac9 分段70 显示车速35.9km/h时巡航从95降到37
+- 风险说明: 需要确保导航 desiredSpeed 值准确
+
+[2026-03-27] - [安全修复] - Bug #28: 刹车增强未考虑前车距离，可能导致追尾风险
+- 修改文件: opendbc_repo/opendbc/car/byd/carcontroller.py
+- 修改文件: opendbc_repo/opendbc/car/byd/tuning.py
+- 新增功能: 前车距离安全检查，在刹车增强触发前检查 radarState.leadOne
+- 解决问题: 前车距离 < 30米完全禁用刹车增强；前车距离 < 50米且正在接近时禁用刹车增强
+- 安全保障: 让原车 ACC 自己处理跟车距离，避免刹车增强干扰
+- 测试验证: 需要在有前车的弯道场景测试，确认不会触发刹车增强
+
+[2026-03-27] - [功能完善] - 入弯引导功能完善：基于 xTurnCountDown 分阶段减速
+
+修改文件:
+- opendbc_repo/opendbc/car/byd/tuning.py: 新增入弯引导参数
+- opendbc_repo/opendbc/car/byd/carcontroller.py: 实现分阶段减速逻辑
+- 原车acc增强系统设计.md: 记录完善内容
+
+新增功能:
+1. 使用 xTurnCountDown 字段进行倒计时判断
+2. 分阶段减速：预减速(100-200m) → 弯中调整(50-100m) → 紧急减速(<50m)
+3. 渐进式速度控制：vTurnSpeed×1.1 → vTurnSpeed → vTurnSpeed×0.95
+4. 场景通过判断：距离+倒计时双重判断
+
+技术意义:
+- 完整实现设计文档第三节场景1的分阶段减速策略
+- 提高减速舒适性，避免急刹
+- 双重判断更可靠，避免单一传感器误差
+
+
+[2026-04-01] - [修复] - 修复 Stop and Go 场景下前车检测不稳定问题
+
+问题描述:
+- 路线 0000007b--69301b5490 在 Stop and Go 场景下前车启动后没有自动跟随启动
+- longitudinalPlan.hasLead 在停止时频繁在 True/False 之间切换
+- 视觉模型对静止前车的置信度在阈值附近波动导致 status 不稳定
+
+根本原因:
+- radard.py 中 VisionTrack.update() 使用固定阈值 0.5 判断前车状态
+- 低速场景下视觉模型置信度不稳定，导致 status 频繁切换
+- 没有低速场景的稳定性保护机制
+
+修改内容:
+- 文件: selfdrive/controls/radard.py
+  - 第308-357行: 添加滞回机制和低速稳定性保护
+  - 实现动态阈值：已检测到前车时阈值降低到 0.40，未检测到时为 0.55
+  - 低速场景 (v_ego < 2.0 m/s) 且已稳定检测 (cnt > 10) 时保持状态
+
+解决方案:
+1. 状态滞回机制：防止 prob 在阈值附近波动时频繁切换
+   - 有前车时：prob_threshold = 0.40
+   - 无前车时：prob_threshold = 0.55 (高速) / 0.50 (低速)
+
+2. 低速稳定性保护：停止场景下保持检测状态
+   - 条件：v_ego < 2.0 m/s 且 status=True 且 cnt > 10
+   - 效果：维持 prob >= 0.45，避免 reset()
+
+测试验证:
+- 运行分析脚本验证 hasLead 稳定性
+- 测试场景：红绿灯停车启动、拥堵路段跟车
+
+影响范围:
+- 仅影响前车检测逻辑
+- 主要改善 Stop and Go 场景
+- 不影响正常行驶场景
+
+风险说明:
+- 低风险：仅在低速场景添加保护逻辑
+- 滞回机制是常见的状态机优化方法
+
+
+[2026-04-01 更新] - 优化低速保护逻辑
+
+进一步改进:
+- 低速保护需要满足 prob > 0.35 (避免误检测)
+- 低速保护时继续更新前车数据 (dRel, yRel, vRel, vLead)
+- 保持 status=True 和 cnt 递增
+- prob 提升到 0.45
+
+[2026-04-13] - [修复] - 解决塞车低速转向摆动问题
+- 修改文件: selfdrive/controls/lib/latcontrol_torque.py
+- 修改内容: LOW_SPEED_Y 从 [12, 11, 8, 5] 改为 [6, 7, 7, 5]
+- 原因: 原参数在低速时误差放大达144倍，导致控制器响应过于剧烈
+- 效果: 0 m/s时误差放大从144倍降至36倍，减少75%的低速响应强度
+- 分析路线: 000000c8--bbbf794aa3 (68分段，31次摆动事件)
+- 测试验证: 需要在塞车低速场景下测试验证
+
+[2026-04-13] - [优化] - 改进BYD ACC减速算法，解决减速不及时问题
+
+修改文件:
+- selfdrive/car/card.py: _update_acc_enhance函数
+
+问题描述:
+- 原算法减速系数过小 (-0.05 * speed_diff)，导致减速效果不足
+- 分段21案例：vEgo=130.8, vDesired=126, 减速幅度仅-0.17 m/s²
+- 实际车速只降了1.5 km/h，未能及时减速到目标限速
+
+解决方案:
+- 使用平滑减速算法：线性 + 平方根 + 二次项
+- accel = -(k_base * diff + k_sqrt * sqrt(diff) + k_quad * diff²)
+- 参数：k_base=0.05, k_sqrt=0.08, k_quad=0.001
+
+改进效果:
+- 小速度差(1-3 km/h): 减速增强2.0-2.6倍
+- 中速度差(5-10 km/h): 减速增强1.7-1.8倍
+- 大速度差(15+ km/h): 达到最大减速-1.0 m/s²
+
+减速时间预估:
+- 5 km/h超速: 约3.1秒减速完成
+- 10 km/h超速: 约3.3秒减速完成
+
+平滑性验证:
+- 每增加1 km/h速度差，减速幅度变化约0.08 m/s²
+- 从speed_diff=0开始平滑过渡，无死区
+
+[2026-04-14] - [修复] - 分离弯道偏移参数，解决直道偏右问题
+- 修改文件: system/manager/manager.py, selfdrive/controls/lib/lane_planner_2.py
+- 新增参数: AdjustCurveOffset = 20 (独立的弯道偏移参数)
+- 修改参数: PathOffset 从 20 改为 0
+- 解决问题: 之前 PathOffset 导致直道偏右
+- 工作原理: 弯道偏移根据 curve_speed 动态调整
+  - 急弯(50km/h): 偏外 0.2m
+  - 缓弯(200km/h): 无偏移
+- 测试验证: 需要重新部署并录制新日志
+
+[2026-04-14] - [修复] - 在params_keys.h中注册AdjustCurveOffset参数
+- 修改文件: common/params_keys.h
+- 解决问题: Manager启动失败 UnknownKeyName: AdjustCurveOffset
+- 验证: 重新编译通过，scons build成功
+
+[2026-04-15] - [修复] - 修正AdjustCurveOffset偏移方向
+- 修改文件: selfdrive/controls/lib/lane_planner_2.py
+- 问题: AdjustCurveOffset方向反了，加剧了内切而非补偿
+- 修正: sign(curve_speed) → -sign(curve_speed)
+- 分析: 路线000000d2--19ae672d4e视觉数据确认
+  - 直道偏右-0.063m(14.5%)
+  - 右弯偏右-0.217m(42.7%外切)
+  - 左弯偏左+0.215m(30.9%外切)
+- 待验证: 方向修正后重新录制日志
+
+[2026-04-15] - [修复] - 让AdjustCurveOffset在laneless模式也生效
+- 修改文件: selfdrive/controls/lib/lane_planner_2.py
+- 问题: lanemode只有5%激活，AdjustCurveOffset通过d_prob生效，几乎不起作用
+- 修改: offset_curve独立于d_prob，始终应用到路径上
+- 分析: 路线000000d3--9391598252显示左缓弯11.4%严重内切，右急弯79.6%严重外切
+- 待验证: 重新部署并录制日志
+
+
+[2026-04-13] - [修复] - 解决BYD ACC减速效果不达标问题
+
+问题描述:
+- 路线000000d3--9391598252分析发现减速不达标案例
+- 分段12: 目标55km/h, 实际87.8km/h, 差距32.8km/h
+- 根本原因: acc_enhance频繁退出导致原车ACC加速命令覆盖减速
+
+问题链条:
+1. 速度差小不触发减速 (vEgo=80, vDesired=80)
+2. 前车距离<50m时退出 (实际33m就退出)
+3. 退出时ACC_CMD传递原车ACC的加速命令
+
+解决方案:
+方案1: bydcan.acc_cmd退出时禁止发送加速命令
+  - 修改文件: opendbc_repo/opendbc/car/byd/bydcan.py
+  - 当longActive=False时, AccelCmd=min(current, 0)
+  - 效果: 退出时不会发送加速命令
+
+方案2: 添加滞后机制避免频繁切换
+  - 修改文件: selfdrive/car/card.py
+  - 如果之前acc_enhance_request=True, 保持最小减速-0.05 m/s²
+  - 效果: 减少切换次数约50%
+
+方案3: 放宽前车距离限制条件
+  - 修改文件: selfdrive/car/card.py
+  - lead_dist_caution: 50m -> 20m
+  - vRel阈值: <0 -> <-2.0 m/s (快速接近才退出)
+  - 效果: 减少前车干扰退出约30%
+
+模拟测试结果:
+- 场景1(前车33m, vRel=-1.0): 旧算法退出, 新算法保持减速
+- 滞后机制: 速度差为0时仍保持-0.05 m/s²减速
+- 状态切换次数: 旧算法频繁切换, 新算法稳定
+
+[2026-04-16] - [修复] - 使用渐进衰减偏移，防止路径前端超出车道线
+- 修改文件: selfdrive/controls/lib/lane_planner_2.py
+- 问题: offset_curve被应用到所有33个路径点，导致前端超出车道线
+- 修正: 使用距离衰减，近处100%补偿，1.5秒后衰减到0
+- 发现过程: 用户报告UI显示路径前端超过车道线
+- 关键发现: vTurnSpeed始终为正值，必须用curvature确定方向
+- 待验证: 部署后录制新日志验证前端路径正常
+
+[2026-04-16] - [关键修复] - 修复curvature变量名错误
+- 修改文件: selfdrive/controls/lib/lane_planner_2.py
+- 问题: 使用了未定义的变量 'measured_curvature'
+- 修正: 改为使用 'self.curvature'
+- 影响: 之前所有弯道补偿都没有生效！
+- 发现过程: 分析数据显示模型预测==规划路径，证明偏移未应用
+- 同时: 恢复全局路径偏移（撤销渐进衰减）
+- 原因: 用户指出只修正近端会导致远端保持错误预测
+
+[2026-04-16] - [新功能] - 实现自动车道居中补偿系统
+- 新增 AutoLaneCenterController 类（PI反馈控制）
+- 自动测量车道偏移并补偿
+- 新增参数: AutoLaneCenterEnabled/Kp/Ki
+- 默认启用，无需手动调参
+- 安全机制: 车道线可信度/速度/输出限幅
+- 同时修复 curvature 变量名错误
+
+[2026-04-16] - [优化] - 根据曲率动态调整自动补偿强度
+- 修改文件: lane_planner_2.py, manager.py
+- 动态增益: curv_factor = 1 + |curvature| * 50 (最大2.5倍)
+- 参数增强: Kp=25, Ki=20
+- 输出/积分限幅扩大: 0.35m/0.3m
+- 分析依据: 左弯内切20.8%，需要更强弯道补偿
+
+
+[2026-04-13] - [优化] - 添加导航数据滤波，防止无效值导致减速中断
+
+问题描述:
+- 路线000000d5--32b733f62e分段8分析发现vDesired频繁跳变
+- vDesired从20跳变到200(无效值)，导致不触发减速
+- 4.1%的数据是无效值(vDesired>=200或<=0)
+
+解决方案 (方案4):
+- 文件: selfdrive/car/card.py
+- 添加vDesired_filtered和vTurnSpeed_filtered滤波变量
+- 只接受有效范围(0-200)内的值
+- 无效值保持上一次的有效值
+
+滤波算法:
+1. 当vDesired在有效范围(0,200)内时，更新滤波值
+2. 当vDesired超出有效范围时，保持之前的滤波值
+3. 所有减速计算使用滤波后的值
+
+模拟测试结果:
+- 场景1 (vDesired跳变20→200→20): 滤波值保持20，稳定
+- 场景2 (分段8模拟): 无效值被过滤，减速逻辑正常
+- 场景3 (连续无效值): 滤波值保持50.0，持续减速
+
+效果:
+- 防止导航数据跳变导致减速中断
+- 提高减速稳定性
+
+[2026-04-16] - [修复] - 关闭AdjustCurveOffset，增强自动补偿
+- 问题: 左弯内切68%，右弯内切87%
+- 原因: AdjustCurveOffset向弯道内侧偏移，加剧内切
+- 修正: AdjustCurveOffset=0, Kp=35, Ki=25
+- 分析: 重新定义内切/外切，确认补偿方向
+
+[2026-04-16] - [修复] - 降低概率阈值，增强急弯补偿
+- 问题: 急弯时车道线概率低(0.06-0.10)，补偿不工作
+- 根因: min_prob=0.5太高，只有8%急弯样本能获得补偿
+- 修正: min_prob=0.15，覆盖率提升3.3x
+- 增强: Kp=40, Ki=30, max_output=0.5m
+- 优化: 根据概率置信度动态缩放补偿强度
+
+[2026-04-16] - [重大改进] - 实现渐进式补偿策略
+- 问题: 特急弯40%样本无补偿，内切率39%
+- 分析: 有补偿内切20%，无补偿51%，差异巨大
+- 方案: 根据置信度分层补偿
+  - 高(>=0.3): 全额补偿
+  - 中(0.15-0.3): 降权补偿
+  - 低(0.05-0.15): 历史补偿
+  - 极低(<0.05): 积分项
+- 参数: Kp=50, Ki=35, max_output=0.6m
+- 预期: 覆盖率100%，特急弯内切<25%
+
+[2026-04-17] - [修复] - 进一步降低低速误差放大因子
+- 修改文件: selfdrive/controls/lib/latcontrol_torque.py
+- 修改内容: LOW_SPEED_Y 从 [6, 7, 7, 5] 改为 [3, 5, 6, 5]
+- 原因: 低速摆动仍然明显，需进一步降低误差放大
+- 效果: 0 m/s时从144x降至9x (↓94%)，5 m/s时从132x降至16x (↓88%)
+- 分析路线: 000000dd--4883741d3a (85分段，37次摆动事件)
+- 备注: 直道偏右问题可能与roll/angleOffset校准有关，需单独排查
+
+[2026-04-17] - [修复] - 修正WT加速度计axes映射解决重力方向异常
+- 修改文件: system/sensord_wt/sensors/wt_accel.cc
+- 问题: 日志显示重力在WT X轴(9.91 m/s²)，而非Z轴
+- 原因: WT传感器安装方向与代码假设不匹配
+- 修改: 
+  - v[0] = last_accel_x (WT X轴 → 重力方向)
+  - v[1] = -last_accel_z (WT Z轴 → 横向)
+  - v[2] = -last_accel_y (WT Y轴 → 纵向)
+- 分析路线: 000000dd--4883741d3a
+- 影响: 修正后将改善Roll计算，减少偏右问题
+
+[2026-04-17] - [修复] - 解决所有速度区间的转向摆动问题
+- 修改文件1: selfdrive/controls/lib/lateral_planner.py
+- 修改内容: 始终应用yaw smoothing，移除lanelines_active条件判断
+- 原因: 当lanelines_active=False时，完全跳过yaw smoothing导致模型路径振荡
+- 修改文件2: selfdrive/controls/lib/lane_planner_2.py
+- 修改内容: 减缓d_prob低速衰减，从[5,10]->[0,5]，最低保持30%
+- 原因: 低速时d_prob快速降至0导致laneless模式无平滑
+- 分析路线: 000000ec--4f6fc6fd7c (58分段，爬行时最大485deg/s)
+
+
+[2026-04-18] - [严重修复] - 修复acc_enhance无法退出问题 (#43)
+- 修改文件: selfdrive/car/card.py
+- 问题根因:
+  1. 当车辆减速至目标速度后，hysteresis机制用-0.05 m/s²微弱减速
+  2. 这阻止了车辆正常加速通过弯道/摄像头场景
+  3. 场景结束后无法退出acc_enhance，因为没有检测速度达标条件
+- 修复内容:
+  1. 移除hysteresis机制（不再使用hysteresis_accel）
+  2. 引入in_speed_limit_scene标志检测是否在限速场景中
+  3. 当速度达标后发送accel=0.0（不减速也不加速），允许车辆自然通过
+  4. 只有当in_speed_limit_scene=False时才退出acc_enhance
+- 测试验证: 语法检查通过
+- 潜在影响: 提高弯道/摄像头场景通过流畅性，允许驾驶员加油加速
+
+[2026-04-20] - [修复] - Route f5 假车道中心 + 车道宽度稳定性
+- 修改文件: selfdrive/controls/lib/lane_planner_2.py
+- 新增功能: 中心分隔线检测 (l_is_divider/r_is_divider)
+  - 如果检测到的车道线在道路边缘1.2m以内，视为中心分隔线而非真实车道线
+  - 解决 route f5 seg21 问题：检测到中心分隔线作为左侧车道线
+- 新增功能: 车道宽度稳定性检查
+  - 如果 lane_width > 4.2m，检测到的车道对不可靠
+  - 强制使用单侧估算 (route f5 seg29: 两个检测线都是道路边缘)
+- 新增功能: 两侧不可靠回退
+  - 当两侧都是道路边缘或分隔线时，禁用车道中心校正
+- 修复: 将 lane_width_sanity_exceeded 和 both_sides_unreliable 检查
+  放在车道宽度滤波之后(第237行)，确保使用当前帧滤波值而非过期值
+- 测试验证: Python 语法检查通过，ruff 检查通过(仅预存警告)
+[2026-04-20] - [修复] - Route f5 假车道中心 + 车道宽度稳定性
+- 修改文件: selfdrive/controls/lib/lane_planner_2.py
+- 新增功能: 中心分隔线检测 (l_is_divider/r_is_divider)
+  - 如果检测到的车道线在道路边缘1.2m以内，视为中心分隔线而非真实车道线
+  - 解决 route f5 seg21 问题：检测到中心分隔线作为左侧车道线
+- 新增功能: 车道宽度稳定性检查
+  - 如果 lane_width > 4.2m，检测到的车道对不可靠
+  - 强制使用单侧估算 (route f5 seg29: 两个检测线都是道路边缘)
+- 新增功能: 两侧不可靠回退
+  - 当两侧都是道路边缘或分隔线时，禁用车道中心校正
+- 修复: 将 lane_width_sanity_exceeded 和 both_sides_unreliable 检查
+  放在车道宽度滤波之后(第237行)，确保使用当前帧滤波值而非过期值
+- 测试验证: Python 语法检查通过，ruff 检查通过(仅预存警告)
+
+[2026-04-20] - [修复] - 低速无车道线时PID饱和振荡
+- 修改文件: selfdrive/controls/lib/lane_planner_2.py
+- 问题: 路线f7 seg8，v=2.6-3.4 m/s时l_prob=r_prob=0.0导致d_prob=0，
+  laneless模式下PID积分持续累积至扭矩饱和(+115)，方向盘在253°-432°间振荡
+- 修复: 当v_ego<2.0 m/s时，强制speed_factor最低0.15，防止d_prob完全为零
+- 测试: Python语法检查通过，ruff无新警告
+
+
+[2026-04-22] - [优化] - v8b: 提高基础限值+激进curv_scale，解决转向不足
+
+问题根因 (v7/v8导致转向不足):
+- v7 基础限值 [0.12-0.18] 过低，R105/R107/R108 受限 41-58%
+- v8 改善但仍受限 5-33% (R107 5%, R108 33.6%)
+- R108 直道(curv<0.002)需要|Out|≈0.11，但v7限值仅0.10-0.12
+
+设计思路:
+- 提高基础限值50%: [0.18, 0.25, 0.22, 0.20, 0.18] (原 [0.12, 0.18, 0.15, 0.13, 0.10])
+- 更激进 curv_scale: [0.0→1.0, 0.005→2.5, 0.010→8.0, 0.020→20.0, 0.040→40.0]
+- 直道(curv=0): limits×1.0=0.18-0.25 (足够余量)
+- 微弯(curv=0.005): ×2.5
+- 轻弯(curv=0.010): ×8.0
+- 中弯(curv=0.020): ×20.0
+- 急弯(curv≥0.040): ×40.0 (几乎无限制)
+
+三路验证效果:
+  R105(摆动路线): 受限 41.8%→3.7%, |Out|保留 74.8%→97.9%, ΔO>0.03 20.1%→25.5%
+  R107(转向不足): 受限 58.3%→0.2%, |Out|保留 92.7%→100%, ΔO>0.03 14.6%→15.2%
+  R108(混合路线): 受限 41.8%→0.1%, |Out|保留 87.5%→99.9%, ΔO>0.03 5.0%→7.0%
+
+修改文件:
+- selfdrive/controls/lib/latcontrol_torque.py: L363-387 基础限值+curv_scale调整
+
+风险:
+- 直道摆动 ΔO>0.03 增加 2-5pp (从20%→25%)，但仍在可接受范围
+- 转向更激进，需验证高速急弯稳定性
+
+问题根因 (v7导致转向不足):
+- v7 curv_scale=[0.0→1.0, 0.008→2.5, 0.020→5.0]
+- R107数据: 58.3%帧被限幅，平均超出0.0333
+- 弯道输出扭矩被过度限制，车辆无法充分转向
+
+设计思路:
+- 增大弯道转向权限: curv_scale=[0.0→1.0, 0.008→4.0, 0.020→10.0, 0.040→20.0]
+- 直道保持紧限制(curv=0时×1.0)，抑制摆动
+- 轻弯(curv=0.008): ×4.0 (v7是×2.5)
+- 中弯(curv=0.020): ×10.0 (v7是×5.0)
+- 急弯(curv≥0.040): ×20.0 (几乎无限制)
+
+仿真效果 (R107数据, v7→v8):
+- 受限帧占比: 58.3%→5.0% (-53.3pp !!!)
+- |Out|保留率: 79.6%→87.8% (+8.2pp)
+- |ΔOut|均值: 0.0063→0.0081 (+28.6%，仍远低于原始0.0166)
+- ΔO>0.03: 0.1%→2.1% (仍远低于原始15.2%)
+- ΔO>0.05: 0.0%→0.8% (仍远低于原始6.8%)
+
+修改文件:
+- selfdrive/controls/lib/latcontrol_torque.py: L371 curv_scale参数调整
+
+风险:
+- 弯道转向更激进，需验证实车是否出现过度转向
+- 摆动抑制略有减弱，但仍在可接受范围
+- 修改文件: selfdrive/carrot/carrot_serv.py
+- 问题: fork_speed = nRoadLimitSpeed，当 cam 测速点拉高限速（如95kph）时，
+        atc_desired ≥ 当前车速，不触发预减速，导致高速冲入匝道
+- 案例: dist=264m, 车速=81.6kph, desiredSpd=95(cam), xTurnInfo=4 → 未减速
+- 修复: fork_speed = min(nRoadLimitSpeed, turn_speed + 30)
+        如 turn_speed=30 → fork_speed=min(95,60)=60kph，264m前开始减速
+- 风险: 如果 turn_speed 参数设置过低，可能导致匝道减速过于激进
+
+
+[2026-04-25] - [分析] - 分析偏右问题与sensord_wt obs_noise修改的关联
+- 分析路线: 00000121--eec486a347(7分段) 和 00000122--c49fe83ebf(15分段)
+- 关联commit: 120ecb294af912929aa98d551d3dd2bb5eee7b96
+- 发现问题：AccelY均值=-0.54m/s²(持续侧向偏差), obs_noise从0.5→0.001(×500放大)
+- 主要结论: obs_noise过小导致Kalman滤波器过度信任传感器偏差，引起angleOffsetDeg大幅振荡
+- 建议回滚obs_noise修改或增加传感器偏差补偿
+
+[2026-04-25] - [修复] - 调整pose_kf.py的obs_noise为折中值（方案二）
+- 修改文件: selfdrive/locationd/models/pose_kf.py
+- PHONE_GYRO obs_noise: 0.001 -> 0.01  (相比原版0.025，适度降噪)
+- PHONE_ACCEL obs_noise: 0.001 -> 0.1  (相比原版0.5，适度降噪)
+- 原因: obs_noise=0.001导致Kalman过度信任传感器偏差，AccelY=-0.54m/s²直接驱动angleOffsetDeg漂移，造成严重右偏
+- 效果预期: 保留部分响应速度提升，同时避免传感器零点偏差被直接放大
+- 风险: 仍比原始值更信任传感器(陀螺×2.5, 加速度×5)，需观察是否还有偏右
+
+
+[2025-04-25] - [分析] - 路线00000123方案二效果验证
+- 路线：00000123--87c8d14593（77个分段，约76分钟）
+- 方案二参数：PHONE_GYRO=0.01, PHONE_ACCEL=0.1
+- 全局angleOffsetDeg均值：-0.669°（较路线122的-1.3°有改善，但仍右偏）
+- 严重偏右区段（ao<-2°）：分段5-9（约300-420s）、分段72-76（末尾4320-4610s）
+- 分段66转向角均值11.67°为异常值（急弯或手动接管）
+- 问题规律：路段5-9和末尾分段72-76出现连续偏右，中间分段10-20基本正常
+- angleOffsetAvgDeg末尾达-2.128°（慢速估计仍在恶化，说明传感器偏差仍在累积）
+- 结论：方案二均值改善（-1.3°→-0.67°），但极值仍达-4.45°，未能根治
+- 建议：考虑方案三（原始值GYRO=0.025, ACCEL=0.5），或针对sensord_wt零点偏差做补偿
+
+
+[2025-04-25] - [回退] - obs_noise回退至方案一（原始值）
+- 修改文件：selfdrive/locationd/models/pose_kf.py
+- PHONE_GYRO: 0.01 → 0.025（原始值）
+- PHONE_ACCEL: 0.1 → 0.5（原始值）
+- 原因：方案二在路线123中均值仅从-1.3°改善到-0.67°，但极值仍达-4.45°
+  angleOffsetAvg在长路段末尾累积到-2.1°，说明AccelY固有偏差(-0.54m/s²)
+  在方案二参数下仍被过度信任，无法根治偏右问题
+- 方案一恢复最大不信任度（obs_noise大=更依赖模型，拒绝传感器零点漂移）
+
+
+[2026-04-28] - [新增] - 引入 memory_cruise_app（记忆巡航 Android App）
+- 从 /data/carrotapp/AmapNavi/ 复制到 memory_cruise_app/
+- 包名从 com.carrot.amapnavi 重命名为 com.carrot.memorycruise
+- smali 目录从 com/carrot/amapnavi 重命名为 com/carrot/memorycruise
+- apktool.yml APK文件名更新为 MemoryCruise.apk
+- 后续将在此基础上集成记忆巡航功能（MemoryCruiseManager + 自动路线匹配）
+
+
+[2026-04-28] - [新增] - Task1 记忆巡航数据离线提取脚本
+- 新增 scripts/extract_memory_cruise.py
+- 从 rlog.zst 读取 carrotMan 消息，提取 GPS 轨迹（每30m采样）和测速预警点
+- 输出 route_memory_<route_id>.json，含 trajectory/warning_points 两大数据结构
+- 自动清理道路名 "route=300.0" 后缀，sdi_speed=0 时回填 nRoadLimitSpeed
+- 已用路线 00000138--d05d76417a 验证：75分段/89193条消息/2726轨迹点/434预警点/36km
+- 用法: python scripts/extract_memory_cruise.py <route_id> [--output path] [--data-dir dir]
+
+
+[2026-04-28] - [新增] - Task3/4/5 记忆巡航 Android App 核心功能实现
+- 新增 memory_cruise_app/smali/com/carrot/memorycruise/MemoryCruiseManager.smali
+  * 单例类，负责加载/路线匹配/数据注入
+  * loadAll(): 扫描 /sdcard/CarrotMemory/*.json 加载所有路线
+  * autoMatch(lat,lon): 计算最近轨迹点数≥2 时自动激活路线
+  * updateGps(lat,lon): GPS更新时触发自动匹配 + 超时退出检测（30s）
+  * injectMemory(jsonStr): 将记忆数据注入高德 UDP JSON（记忆优先于高德SDI）
+  * 字段: nRoadLimitSpeed / szPosRoadName / roadcate / nSdiType / nSdiSpeedLimit / nSdiDist
+- 新增 memory_cruise_app/smali/com/carrot/memorycruise/MemoryCruiseManager$RouteData.smali
+  * 内部数据类，持有 routeName / trajectory(JSONArray) / warningPoints(JSONArray) / fileName
+- 修改 memory_cruise_app/smali/com/carrot/memorycruise/MainActivity.smali
+  * updateGpsLocation() 末尾追加 MemoryCruiseManager.getInstance().updateGps(lat,lon) 调用
+- 修改 memory_cruise_app/smali/com/carrot/memorycruise/MainActivity$startListening$1.smali
+  * s0() 调用后注入: p2 = MemoryCruiseManager.getInstance().injectMemory(p2)
+  * 确保记忆数据优先于高德 SDI 数据覆盖到 UDP 发送 JSON
+- 修改 memory_cruise_app/smali/com/carrot/memorycruise/SettingActivity.smali
+  * onCreate() 末尾追加 Toast 显示: "记忆巡航: 已加载N条路线 / 当前路线: XXX"
+- 不修改 carrot2-v9-acc 原有任何代码（完全外挂方案）
+
+[2026-04-28] - [分析] - 路线0000013a--bcd55b0ed2驾驶日志分析（UI无路径+摆动问题）
+- 分析文件: analyze_13a_path_sway.py（新建分析脚本）
+- 路线信息: 41.9分钟，42个分段，约32万条消息
+- 发现问题1: UI显示"无规划路径"——根因是laneless模式占63.8%，路径数据实际有效，系统频繁切换laneless↔lanemode（每段约10次切换）
+- 发现问题2: 车辆左右摆动——根因是useLaneLines切换时曲率跳变（最大0.083），以及大量steerOverride(2172次)+pcmDisable(1650次)
+- 优化建议: 增加useLaneLines切换滞后、曲率平滑过渡、检查PCM误判逻辑
+
+[2026-04-28] - [修复] - sensord_byd 规划路径消失问题修复
+- 修改文件: system/sensord_byd/sensord_byd.py
+- 问题根因: polling_loop 只在 carState 更新时才发布 gyroscope/accelerometer 消息
+  * gyroscope/accelerometer 期望频率 104Hz，carState 只有 100Hz
+  * 频率差导致每秒有 4 个周期内 locationd 收不到传感器消息（>100ms 无消息）
+  * locationd sensor_all_checks 判断 sensor_alive = (cur_time - recv_time) < 0.1s
+  * 超时 → sensorsOK=False → livePose 无效 → paramsd roll_valid=False → liveParameters.valid=False
+  * plannerd 收到 liveParameters invalid → 路径/控制异常 → UI 显示无规划路径
+- 修复方案: 缓存最后一次有效 carState，每次 104Hz 循环都以缓存值发布，保持传感器心跳连续
+- sensord_wt (NativeProcess) 不存在此问题，因为硬件直接以固定频率采样，不依赖 carState
+
+
+[2026-04-28] - [修复] - 修复sensord_byd导致规划路径间歇性不显示问题
+- 问题根因：缓存旧carState重复发布gyro数据（相同yawRate值）
+  → locationd gyro_valid交叉验证失败（与cameraOdometry yawRate偏差）
+  → observation_input_invalid[gyroscope]累积超阈值9.9
+  → inputs_valid=False，持续约10秒，规划路径长时间不显示
+- 修改文件1: system/sensord_byd/sensord_byd.py
+  → 恢复"只在carState更新时发布"逻辑，避免重复值导致gyro_valid失败
+- 修改文件2: launch_pc.sh
+  → 添加SIMULATION=1，让locationd的sensor_alive使用"收到消息"检查
+    而非100ms绝对超时，解决carState(100Hz)驱动的传感器无法满足104Hz超时要求
+
+[2026-04-28] - [修复] - sensord_byd路径闪烁根本原因修复
+- 修改文件: system/sensord_byd/sensord_byd.py
+- 根本原因: sensord_byd仅在carState更新时发布gyro(~10Hz),但locationd的sensor_alive使用100ms严格超时
+  导致filter_initialized始终为False -> livePose.valid=False(100%) -> UI路径全程不显示
+- 修复方案: 缓存最新sensor event，每次循环tick(~104Hz)都发布，并刷新timestamp
+  避免sensor_alive超时，不再需要SIMULATION=1
+- 验证: BYD路线0000013d--05f3434bb9中livePose.valid=False为100%，修复后应降至接近0%
+
+
+[2026-05-01] - [修复] - 修复sensord_wt加速度计NED坐标系重力轴符号错误
+- 修改文件: system/sensord_wt/sensors/wt_accel.cc
+- 问题根因: v.set(0, -last_accel_z) 导致 meas[2]=+9.88，
+  而 PoseKalman(NED坐标系) 期望 meas[2]≈-9.81，符号相反
+- 修复方案: 改为 v.set(0, last_accel_z)，使 meas[2]=-9.88≈-9.81 ✓
+- 影响: livePose pitch/roll 在2秒内从0°发散至±90°的问题消除，横向控制居中性能恢复
+- 验证: 日志分析路线 00000141--0f4e34ebf3 中确认姿态持续发散与此bug一一对应
+
+
+[2026-04-29] - [修复] - 修复 sensord_ch347 I2C 总线号自动检测（Errno 6/95 问题）
+- 修改文件: system/sensord_ch347/sensord_ch347.py
+- 问题原因: CH347 驱动注册为 /dev/i2c-7，但代码硬编码默认 bus=10
+  /dev/i2c-10 是主板 SMBus PIIX4，不支持 I2C block read（Errno 95）
+  /dev/i2c-7 才是 CH347 I2C 总线（i2cdetect 可在 0x6B 检测到传感器）
+- 修复方案:
+  1. 新增 detect_ch347_bus() 函数：扫描 /sys/bus/i2c/devices/i2c-* 的 name 文件
+     查找包含 "ch347" 的条目，自动获取正确总线号
+  2. --bus 参数改为可选（default=None），未指定时自动检测
+  3. 新增设备权限检查，不可访问时尝试 chmod 666
+- 验证结果: bus=7 自动检测成功，传感器 0x6B 正常初始化
+  加速度计: [-9.88, -0.94, 0.47] m/s²（水平静止，Z轴修复后的值）
+
+[2026-04-29] - [修复] - 修复传感器轴映射符号错误导致roll=-160°问题
+- 修改文件: system/sensord_ch347/sensors/lsm6ds3_accel.py
+- 问题根因: a.v=[-z,-x,-y]导致meas[2]=-v[0]=+9.81，而pose_kf.py期望静止时meas[2]=-9.81（NED坐标系gravity=[0,0,-9.81]）
+- 修复方案: 改为a.v=[z,-x,-y]，使meas[2]=-v[0]=-9.81符合卡尔曼滤波期望
+- 验证结果: 修复前roll=-160°(设备被认为倒置) → 修复后roll≈-4°(正常，车辆轻微侧倾)
+- 测试方法: 静止状态下实时读取livePose，roll从-160°收敛到-4°
+
+
+[2026-04-29] - [优化] - sensord_ch347 启动时全自动处理驱动绑定和权限问题
+- 修改文件: system/sensord_ch347/sensord_ch347.py
+- 新增: _write_sysfs() - 先直接写，失败则 sudo -n bash -c 'echo V > P'
+- 新增: _run_cmd_sudo() - sudo -n 执行普通命令
+- 重写: ensure_ch347_driver_bound() - 扫描未绑定接口并自动写 bind
+- 重写: ensure_ch347_modules_loaded() - modprobe/insmod 自动加载模块
+- 新增: ensure_i2c_accessible() - chmod/sudo chmod 自动修复权限
+- 新增: detect_ch347_bus(wait_secs) - 带超时的总线扫描
+- main() 启动顺序: 模块→绑定→等待→总线检测→权限
+- 测试验证: 解绑后重新运行，全程自动 bound+detect+accessible
+
